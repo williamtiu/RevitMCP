@@ -13,6 +13,9 @@ Revit-Side Listener for RevitMCP (IronPython)
 # except ImportError:
 #     print("Revit API modules not found. Running in a non-Revit environment or IronPython context needs setup.")
 
+import os
+import logging
+
 try:
     # For Python 2.7 (IronPython)
     from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
@@ -24,12 +27,20 @@ except ImportError:
 
 import threading # Added for running server in a separate thread
 
+# --- Logger Setup ---
+# Logger instance will be configured in start_revit_listener_server
+logger = logging.getLogger('RevitMCPListener')
+# --- End Logger Setup ---
+
 # --- RevitMCP Tools Import --- 
 try:
     # Assuming lib folder is in the search path or sys.path is adjusted by pyRevit
     from RevitMCP_Tools import project_info_tool 
 except ImportError as e:
-    print("Error importing project_info_tool: {}. Ensure it's in lib/RevitMCP_Tools and accessible.".format(e))
+    # Logger might not be configured yet if this fails at module import time
+    # So, initial print might be necessary, or defer logging until logger is set up.
+    # For now, keeping print for this initial critical failure.
+    print("CRITICAL: Error importing project_info_tool: {}. Ensure it's in lib/RevitMCP_Tools and accessible.".format(e))
     project_info_tool = None # Set to None so we can check its availability
 # --- End RevitMCP Tools Import ---
 
@@ -43,7 +54,7 @@ class RevitListenerHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        print("Revit Listener: POST request received.")
+        logger.info("POST request received.")
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         
@@ -51,21 +62,23 @@ class RevitListenerHandler(BaseHTTPRequestHandler):
         try:
             # IronPython json might need explicit string decode from byte array
             command_data = json.loads(post_data.decode('utf-8') if hasattr(post_data, 'decode') else post_data)
-            print("Revit Listener: Received command: {}".format(command_data))
+            logger.info("Received command: %s", command_data)
 
             # --- Command Processing Logic ---
             command_name = command_data.get("command")
+            logger.debug("Extracted command_name: '%s' (Type: %s)", command_name, type(command_name))
+            logger.debug("Is command_name == 'get_project_info': %s", command_name == "get_project_info")
 
             # Access to __revit__ context (standard in pyRevit scripts)
             # These would be None if run outside a proper pyRevit execution context.
             try:
                 doc = __revit__.ActiveUIDocument.Document
                 app = __revit__.Application
-                print("Revit Listener: Accessed doc and app from __revit__ context.")
+                logger.debug("Accessed doc and app from __revit__ context.")
             except NameError: # __revit__ is not defined
                 doc = None
                 app = None
-                print("Revit Listener: Warning: __revit__ context not found.")
+                logger.warning("__revit__ context not found.")
 
             if command_name == "get_document_title":
                 if doc:
@@ -81,27 +94,27 @@ class RevitListenerHandler(BaseHTTPRequestHandler):
                         element_ids = [el_id.IntegerValue for el_id in selection.GetElementIds()]
                         response_data = {"status": "success", "data": {"selected_ids": element_ids}}
                     except Exception as sel_e:
+                        logger.error("Error getting selection: %s", sel_e, exc_info=True)
                         response_data = {"status": "error", "message": "Error getting selection: {}".format(sel_e)}
                 else:
                     response_data = {"status": "error", "message": "Revit document or UI document not accessible for selection."}
                 self._set_response()
-            elif command_name == "get_project_info":
-                print("Revit Listener: Processing 'get_project_info' command.")
+            elif command_name == "get_revit_project_info":
+                logger.info("Processing 'get_revit_project_info' command.")
                 if project_info_tool and doc and app:
                     try:
-                        print("Revit Listener: Attempting to call project_info_tool.get_project_information...")
+                        logger.info("Attempting to call project_info_tool.get_project_information...")
                         info = project_info_tool.get_project_information(doc, app)
-                        print("Revit Listener: project_info_tool.get_project_information returned: {}".format(info))
+                        logger.info("project_info_tool.get_project_information returned: %s", info)
                         response_data = {"status": "success", "data": info}
                     except Exception as tool_e:
-                        error_msg = "Revit Listener: Error executing project_info_tool: {}".format(tool_e)
-                        print(error_msg)
-                        response_data = {"status": "error", "message": error_msg}
+                        logger.error("Error executing project_info_tool: %s", tool_e, exc_info=True)
+                        response_data = {"status": "error", "message": "Error executing project_info_tool: {}".format(tool_e)}
                 elif not project_info_tool:
-                    print("Revit Listener: Project info tool not loaded.")
+                    logger.warning("Project info tool not loaded.")
                     response_data = {"status": "error", "message": "Project info tool not loaded."}
                 else: # doc or app missing
-                    print("Revit Listener: Revit document or application not accessible for project info.")
+                    logger.warning("Revit document or application not accessible for project info.")
                     response_data = {"status": "error", "message": "Revit document or application not accessible for project info."}
                 self._set_response()
             else:
@@ -110,76 +123,110 @@ class RevitListenerHandler(BaseHTTPRequestHandler):
             # --- End Command Processing ---
 
         except Exception as e:
-            error_message = "Revit Listener: Error processing request: {}".format(e)
-            print(error_message)
-            response_data = {"status": "error", "message": error_message}
+            logger.error("Error processing request: %s", e, exc_info=True)
+            response_data = {"status": "error", "message": "Error processing request: {}".format(e)}
             self._set_response(status_code=500)
         
-        print("Revit Listener: Preparing to send response: {}".format(response_data))
+        logger.debug("Preparing to send response: %s", response_data)
         self.wfile.write(json.dumps(response_data).encode('utf-8'))
-        print("Revit Listener: Response sent.")
+        logger.info("Response sent.")
 
 # Global variable to hold the server thread instance
 SERVER_THREAD = None
 HTTPD_INSTANCE = None # To allow stopping it
 
+def configure_listener_logging():
+    global logger
+    if not logger.handlers: # Configure only if no handlers exist
+        try:
+            # Path to MyRevitMCP.extension/listener_logs/revit_listener.log
+            # __file__ is the path to this listener.py script
+            # lib_dir = os.path.dirname(__file__) # MyRevitMCP.extension/lib/RevitMCP_RevitListener
+            # revitmcp_lib_dir = os.path.dirname(lib_dir) # MyRevitMCP.extension/lib
+            # extension_root = os.path.dirname(revitmcp_lib_dir) # MyRevitMCP.extension
+            
+            # Simpler path assuming __file__ is available and correct
+            current_script_dir = os.path.dirname(os.path.abspath(__file__))
+            extension_root = os.path.abspath(os.path.join(current_script_dir, '..', '..'))
+            log_dir = os.path.join(extension_root, 'listener_logs')
+
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            
+            log_file = os.path.join(log_dir, 'revit_listener.log')
+
+            logger.setLevel(logging.DEBUG)
+            
+            # File Handler
+            fh = logging.FileHandler(log_file, mode='a') # Append mode
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s')
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
+            
+            logger.info("Revit Listener logging configured to file: %s", log_file)
+
+        except Exception as log_e:
+            # Fallback to print if logging setup fails
+            print("CRITICAL: Failed to configure file logging for Revit Listener: {}".format(log_e))
+
+
 def start_revit_listener_server():
     """Starts the HTTP server in a separate thread."""
-    global SERVER_THREAD, HTTPD_INSTANCE
+    global SERVER_THREAD, HTTPD_INSTANCE, logger
     
+    configure_listener_logging() # Ensure logger is configured
+
     if SERVER_THREAD is not None and SERVER_THREAD.is_alive():
-        print("Revit Listener server is already running.")
-        # Optionally, use pyrevit.forms to alert user if in pyRevit context
+        logger.info("Listener server is already running.")
         return
 
     def target():
         global HTTPD_INSTANCE
         HTTPD_INSTANCE = HTTPServer((HOST_NAME, PORT_NUMBER), RevitListenerHandler)
-        print("RevitMCP Revit Listener starting on http://{0}:{1} in a new thread...".format(HOST_NAME, PORT_NUMBER))
+        logger.info("Listener starting on http://%s:%s in a new thread...", HOST_NAME, PORT_NUMBER)
         HTTPD_INSTANCE.serve_forever()
-        print("RevitMCP Revit Listener thread finished.") # Should only print if serve_forever stops
+        logger.info("Listener thread finished.") # Should only print if serve_forever stops
 
     SERVER_THREAD = threading.Thread(target=target)
     SERVER_THREAD.daemon = True  # Allow main program to exit even if thread is running
     SERVER_THREAD.start()
-    print("Revit Listener server thread started.")
+    logger.info("Listener server thread started.")
 
 def stop_revit_listener_server():
     """Stops the HTTP server if it's running."""
-    global SERVER_THREAD, HTTPD_INSTANCE
+    global SERVER_THREAD, HTTPD_INSTANCE, logger
     if HTTPD_INSTANCE:
-        print("Attempting to stop Revit Listener server...")
+        logger.info("Attempting to stop listener server...")
         HTTPD_INSTANCE.shutdown() # Signal serve_forever to stop
         HTTPD_INSTANCE.server_close() # Close the server socket
         HTTPD_INSTANCE = None
-        print("Revit Listener server shutdown initiated.")
+        logger.info("Listener server shutdown initiated.")
     else:
-        print("Revit Listener server is not currently running or instance not found.")
+        logger.info("Listener server is not currently running or instance not found.")
 
     if SERVER_THREAD is not None and SERVER_THREAD.is_alive():
         SERVER_THREAD.join(timeout=5.0) # Wait for the thread to finish
         if SERVER_THREAD.is_alive():
-            print("Revit Listener server thread did not stop in time.")
+            logger.warning("Listener server thread did not stop in time.")
         else:
-            print("Revit Listener server thread stopped.")
+            logger.info("Listener server thread stopped.")
         SERVER_THREAD = None
     else:
-        print("Revit Listener server thread is not running.")
+        logger.info("Listener server thread is not running.")
 
 def main(): # Kept for potential direct testing, but not primary use in pyRevit
-    print("Initializing RevitMCP Revit Listener (direct test mode)...")
+    configure_listener_logging() # Configure logging for direct test mode too
+    logger.info("Initializing listener (direct test mode)...")
     start_revit_listener_server()
-    print("Revit Listener main() function called. Server should be running in a background thread.")
-    print("To stop the server when testing directly, interrupt (Ctrl+C).")
+    logger.info("main() function called. Server should be running in a background thread.")
+    logger.info("To stop the server (direct test mode), interrupt (Ctrl+C).")
     if __name__ == "__main__":
         try:
             while True:
-                # Keep main thread alive for Ctrl+C
-                # In a real pyRevit context, the button script would exit, thread continues
                 import time
                 time.sleep(1)
         except KeyboardInterrupt:
-            print("Keyboard interrupt received. Stopping listener server...")
+            logger.info("Keyboard interrupt received. Stopping listener server...")
         finally:
             stop_revit_listener_server()
 

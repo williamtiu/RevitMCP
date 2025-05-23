@@ -1,0 +1,36 @@
+# Python specific
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Logs
+logs/
+*.log
+listener_logs/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Secrets and API Keys (common patterns)
+.env
+*.env
+secrets.json
+credentials.json
+API_KEYS.txt
+config.ini # If it contains secrets
+
+# IDE specific
+.idea/
+.vscode/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/ 
