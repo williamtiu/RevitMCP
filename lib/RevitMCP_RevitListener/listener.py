@@ -24,6 +24,15 @@ except ImportError:
 
 import threading # Added for running server in a separate thread
 
+# --- RevitMCP Tools Import --- 
+try:
+    # Assuming lib folder is in the search path or sys.path is adjusted by pyRevit
+    from RevitMCP_Tools import project_info_tool 
+except ImportError as e:
+    print("Error importing project_info_tool: {}. Ensure it's in lib/RevitMCP_Tools and accessible.".format(e))
+    project_info_tool = None # Set to None so we can check its availability
+# --- End RevitMCP Tools Import ---
+
 HOST_NAME = 'localhost'
 PORT_NUMBER = 8001 # As specified in architecture.md
 
@@ -34,6 +43,7 @@ class RevitListenerHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        print("Revit Listener: POST request received.")
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         
@@ -41,32 +51,73 @@ class RevitListenerHandler(BaseHTTPRequestHandler):
         try:
             # IronPython json might need explicit string decode from byte array
             command_data = json.loads(post_data.decode('utf-8') if hasattr(post_data, 'decode') else post_data)
-            print("Received command: {}".format(command_data))
+            print("Revit Listener: Received command: {}".format(command_data))
 
-            # --- Command Processing Logic (Placeholder) ---
-            if command_data.get("command") == "get_document_title":
-                # In a real scenario, you'd call Revit API here
-                # doc_title = __revit__.Application.ActiveUIDocument.Document.Title # Example
-                doc_title = "DummyRevitProject.rvt" # Placeholder
-                response_data = {"status": "success", "data": doc_title}
+            # --- Command Processing Logic ---
+            command_name = command_data.get("command")
+
+            # Access to __revit__ context (standard in pyRevit scripts)
+            # These would be None if run outside a proper pyRevit execution context.
+            try:
+                doc = __revit__.ActiveUIDocument.Document
+                app = __revit__.Application
+                print("Revit Listener: Accessed doc and app from __revit__ context.")
+            except NameError: # __revit__ is not defined
+                doc = None
+                app = None
+                print("Revit Listener: Warning: __revit__ context not found.")
+
+            if command_name == "get_document_title":
+                if doc:
+                    doc_title = doc.Title
+                    response_data = {"status": "success", "data": {"title": doc_title}}
+                else:
+                    response_data = {"status": "error", "message": "Revit document not accessible."}
                 self._set_response()
-            elif command_data.get("command") == "get_selected_element_ids":
-                # element_ids = [el.Id.IntegerValue for el in __revit__.ActiveUIDocument.Selection.GetElementIds()] # Example
-                element_ids = [123, 456] # Placeholder
-                response_data = {"status": "success", "data": element_ids}
+            elif command_name == "get_selected_element_ids":
+                if doc and hasattr(__revit__, 'ActiveUIDocument') and __revit__.ActiveUIDocument:
+                    try:
+                        selection = __revit__.ActiveUIDocument.Selection
+                        element_ids = [el_id.IntegerValue for el_id in selection.GetElementIds()]
+                        response_data = {"status": "success", "data": {"selected_ids": element_ids}}
+                    except Exception as sel_e:
+                        response_data = {"status": "error", "message": "Error getting selection: {}".format(sel_e)}
+                else:
+                    response_data = {"status": "error", "message": "Revit document or UI document not accessible for selection."}
+                self._set_response()
+            elif command_name == "get_project_info":
+                print("Revit Listener: Processing 'get_project_info' command.")
+                if project_info_tool and doc and app:
+                    try:
+                        print("Revit Listener: Attempting to call project_info_tool.get_project_information...")
+                        info = project_info_tool.get_project_information(doc, app)
+                        print("Revit Listener: project_info_tool.get_project_information returned: {}".format(info))
+                        response_data = {"status": "success", "data": info}
+                    except Exception as tool_e:
+                        error_msg = "Revit Listener: Error executing project_info_tool: {}".format(tool_e)
+                        print(error_msg)
+                        response_data = {"status": "error", "message": error_msg}
+                elif not project_info_tool:
+                    print("Revit Listener: Project info tool not loaded.")
+                    response_data = {"status": "error", "message": "Project info tool not loaded."}
+                else: # doc or app missing
+                    print("Revit Listener: Revit document or application not accessible for project info.")
+                    response_data = {"status": "error", "message": "Revit document or application not accessible for project info."}
                 self._set_response()
             else:
-                response_data = {"status": "error", "message": "Unknown command"}
+                response_data = {"status": "error", "message": "Unknown command: {}".format(command_name)}
                 self._set_response(status_code=400)
             # --- End Command Processing ---
 
         except Exception as e:
-            error_message = "Error processing request: {}".format(e)
+            error_message = "Revit Listener: Error processing request: {}".format(e)
             print(error_message)
             response_data = {"status": "error", "message": error_message}
             self._set_response(status_code=500)
         
+        print("Revit Listener: Preparing to send response: {}".format(response_data))
         self.wfile.write(json.dumps(response_data).encode('utf-8'))
+        print("Revit Listener: Response sent.")
 
 # Global variable to hold the server thread instance
 SERVER_THREAD = None
