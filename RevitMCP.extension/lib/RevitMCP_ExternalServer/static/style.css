@@ -22,6 +22,8 @@ body {
 }
 
 .chat-log {
+    display: flex;
+    flex-direction: column;
     flex-grow: 1;
     padding: 15px;
     overflow-y: auto;
@@ -33,15 +35,16 @@ body {
     padding: 10px 15px;
     border-radius: 20px;
     line-height: 1.5;
-    max-width: 85%;
     word-wrap: break-word;
 }
 
 .user-message {
-    background-color: #007bff;
+    background-color: #1362bb;
     color: white;
     align-self: flex-end;
     margin-left: auto;
+    text-align: right;
+    width: fit-content;
 }
 
 .bot-message {
@@ -79,7 +82,7 @@ body {
 }
 
 .chat-input-area button:hover {
-    background-color: #0056b3;
+    background-color: #1362bb;
 }
 
 .settings-icon {
@@ -153,7 +156,7 @@ body {
 }
 
 .modal-content button:hover {
-    background-color: #0056b3;
+    background-color: #1362bb;
 }
 
 .close-button {

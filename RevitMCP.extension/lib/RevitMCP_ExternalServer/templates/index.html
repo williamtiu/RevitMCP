@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RevitMCP Chat</title>
     <script defer src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -183,31 +184,9 @@
             overflow-y: auto;
             background-color: #ffffff;
             border-bottom: 1px solid #e0e0e0;
+            /* Styles for .message, .user-message, .bot-message will be removed from here */
         }
 
-        .message {
-            margin-bottom: 15px;
-            padding: 10px 15px;
-            border-radius: 18px;
-            line-height: 1.5;
-            max-width: 80%;
-        }
-
-        .user-message {
-            background-color: #007bff; /* Blue for user */
-            color: white;
-            align-self: flex-end;
-            margin-left: auto; /* Pushes to the right */
-            border-bottom-right-radius: 5px;
-        }
-
-        .bot-message {
-            background-color: #e9ecef; /* Light grey for bot */
-            color: #333;
-            align-self: flex-start;
-            border-bottom-left-radius: 5px;
-        }
-        
         /* Markdown specific styles for bot messages */
         .bot-message pre {
             background-color: #2d2d2d;
@@ -272,7 +251,7 @@
 
         #send-button {
             padding: 10px 20px;
-            background-color: #007bff;
+            background-color: #1362bb;
             color: white;
             border: none;
             border-radius: 20px;
@@ -280,7 +259,7 @@
             font-size: 1em;
         }
         #send-button:hover {
-            background-color: #0056b3;
+            background-color: #164881;
         }
         
         #status {
