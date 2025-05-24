@@ -1,13 +1,17 @@
+# RevitMCP: This script runs in a standard CPython 3.7+ environment. Modern Python syntax is expected.
 """
 External Flask server for RevitMCP.
 This server will handle requests from the Revit UI (via a listener)
 and can also host a web UI for direct interaction.
 """
 
+print("--- RevitMCP External Server script starting ---") # Early print diagnostic
+
 from flask import Flask, request, jsonify, render_template
 import requests # For sending requests to the Revit Listener (if needed in future)
 import os
 import json # For parsing conversation history if it comes as a string
+import sys
 
 # LLM Libraries - Initialize them if needed, or do it per-request
 import openai
@@ -56,17 +60,40 @@ REVIT_TOOLS_SPEC = {
 
 # --- End Tool Definitions ---
 
-# Configuration (could be moved to a config file or env vars)
+# Configuration
 DEBUG_MODE = os.environ.get('FLASK_DEBUG_MODE', 'True').lower() == 'true'
+# Explicitly print DEBUG_MODE status
+print(f"--- Flask DEBUG_MODE is set to: {DEBUG_MODE} ---")
 PORT = int(os.environ.get('FLASK_PORT', 8000))
 REVIT_LISTENER_URL = "http://localhost:8001/send_revit_command" # Corrected: The listener itself is at 8001; send_revit_command is a route on *this* server.
 # The actual listener endpoint seems to be just http://localhost:8001 based on listener.py
 # The /send_revit_command route on this Flask server is what forwards to the listener.
 
+# Add a mapping for specific model IDs if they differ from the UI selector values
+ANTHROPIC_MODEL_ID_MAP = {
+    "claude-4-sonnet": "claude-sonnet-4-20250514", # Corrected based on web search
+    "claude-4-opus": "claude-opus-4-20250514",   # Corrected based on web search
+    "claude-3-7-sonnet": "claude-3-7-sonnet-20250219", # Verified
+    "claude-3-5-sonnet": "claude-3-5-sonnet-20240620", # Verified
+    # Add other claude models here if their UI name differs from API ID
+}
+
 @app.route('/', methods=['GET'])
 def chat_ui():
+    app.logger.info("Serving chat_ui (index.html)") # Test Flask logger
     """Serves the main chat UI page."""
     return render_template('index.html')
+
+# Add a new test route for logging
+@app.route('/test_log', methods=['GET'])
+def test_log_route():
+    print("--- PRINT INSIDE /test_log ROUTE ---")
+    sys.stdout.write("--- SYS.STDOUT.WRITE INSIDE /test_log ROUTE ---\n")
+    sys.stdout.flush()
+    sys.stderr.write("--- SYS.STDERR.WRITE INSIDE /test_log ROUTE ---\n")
+    sys.stderr.flush()
+    app.logger.info("--- ACCESSED /test_log route successfully (app.logger.info) ---")
+    return jsonify({"status": "success", "message": "Test log route accessed. Check server console."}), 200
 
 @app.route('/chat_api', methods=['POST'])
 def chat_api():
@@ -74,11 +101,11 @@ def chat_api():
     data = request.json
     conversation_history = data.get('conversation')
     api_key = data.get('apiKey')
-    selected_model = data.get('model')
+    selected_model_ui_name = data.get('model')
 
     if not conversation_history or not isinstance(conversation_history, list) or not conversation_history[-1].get('content'):
         return jsonify({"error": "No message or invalid conversation history provided"}), 400
-    if not selected_model:
+    if not selected_model_ui_name:
         return jsonify({"error": "No model selected"}), 400
     
     user_message_content = conversation_history[-1]['content'].strip()
@@ -127,7 +154,7 @@ def chat_api():
     # --- End Helper function ---
 
     # --- Revit Command Trigger --- 
-    if "revit project info" in user_message_content.lower() and selected_model == 'echo_model': # Keep for echo model for now
+    if "revit project info" in user_message_content.lower() and selected_model_ui_name == 'echo_model': # Keep for echo model for now
         print(f"User requested Revit project info via keyword for echo_model. Calling listener directly.")
         # Directly call listener and format for echo (or simple direct reply)
         listener_output_str = call_revit_listener(REVIT_TOOL_NAME)
@@ -149,23 +176,23 @@ def chat_api():
     user_message = user_message_content # Original variable name for LLM part
 
     # API key is required for all non-echo models
-    if selected_model != 'echo_model' and not api_key:
+    if selected_model_ui_name != 'echo_model' and not api_key:
         return jsonify({"error": "API key is required for this model"}), 400
 
     model_reply = ""
     error_message = None
 
     try:
-        if selected_model == 'echo_model':
+        if selected_model_ui_name == 'echo_model':
             model_reply = (
                 f"Server echoes: '{user_message}'. "
-                f"Model selected: '{selected_model}'. "
+                f"Model selected: '{selected_model_ui_name}'. "
                 f"API Key provided: '{bool(api_key)}'. "
                 f"History items: {len(conversation_history)}."
             )
         
         # --- OpenAI Models --- 
-        elif selected_model.startswith('gpt-') or selected_model.startswith('o1'):
+        elif selected_model_ui_name.startswith('gpt-') or selected_model_ui_name.startswith('o3'):
             # --- OpenAI Tool Definitions (Localized due to previous edit issues) ---
             REVIT_TOOL_NAME_OPENAI = "get_revit_project_info"
             REVIT_TOOL_DESCRIPTION_OPENAI = "Retrieves detailed information about the currently open Revit project, such as project name, file path, Revit version, Revit build number, and active document title."
@@ -230,7 +257,7 @@ def chat_api():
 
             print(f"External Server (OpenAI): Sending to OpenAI: {messages_for_openai}, tools: {openai_tool_spec}")
             completion = client.chat.completions.create(
-                model=selected_model,
+                model=selected_model_ui_name,
                 messages=messages_for_openai,
                 tools=openai_tool_spec,
                 tool_choice="auto", 
@@ -263,7 +290,7 @@ def chat_api():
                 
                 print(f"External Server (OpenAI): Sending to OpenAI again with tool results: {messages_for_openai}")
                 second_completion = client.chat.completions.create(
-                    model=selected_model,
+                    model=selected_model_ui_name,
                     messages=messages_for_openai
                     # No tools or tool_choice here, we want a text response
                 )
@@ -272,8 +299,11 @@ def chat_api():
                 model_reply = response_message.content
 
         # --- Anthropic Models --- 
-        elif selected_model.startswith('claude-'):
+        elif selected_model_ui_name.startswith('claude-'):
             client = anthropic.Anthropic(api_key=api_key)
+            # Use the mapping to get the correct model ID for the API call
+            actual_anthropic_model_id = ANTHROPIC_MODEL_ID_MAP.get(selected_model_ui_name, selected_model_ui_name)
+            
             messages_for_anthropic = []
             
             for msg in conversation_history:
@@ -290,11 +320,11 @@ def chat_api():
             if not messages_for_anthropic or messages_for_anthropic[-1]["role"] != "user":
                 raise ValueError("Anthropic requires the last message to be from the user, or message list is empty.")
 
-            print(f"External Server (Anthropic): Sending to Anthropic: {messages_for_anthropic}, tools: {REVIT_TOOLS_SPEC['anthropic']}")
+            print(f"External Server (Anthropic): Sending to Anthropic with model_id: {actual_anthropic_model_id}")
             
             # Initial call to Anthropic with tools
             response = client.messages.create(
-                model=selected_model,
+                model=actual_anthropic_model_id,
                 max_tokens=1024,
                 messages=messages_for_anthropic,
                 tools=REVIT_TOOLS_SPEC["anthropic"],
@@ -332,7 +362,7 @@ def chat_api():
                     print(f"External Server (Anthropic): Sending tool results back to Anthropic: {messages_for_anthropic}")
                     # Second call to get the final response from the model
                     second_response = client.messages.create(
-                        model=selected_model,
+                        model=actual_anthropic_model_id,
                         max_tokens=1024,
                         messages=messages_for_anthropic
                         # No tools or tool_choice here, we expect a text response
@@ -354,9 +384,9 @@ def chat_api():
                 print(f"External Server (Anthropic): Unexpected initial response: {response.content}")
 
         # --- Google Gemini Models --- (Updated for google-generativeai >= 0.4.0)
-        elif selected_model.startswith('gemini-'):
+        elif selected_model_ui_name.startswith('gemini-'):
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(selected_model)
+            model = genai.GenerativeModel(selected_model_ui_name)
 
             # Gemini expects alternating user/model roles. History needs to be mapped.
             # Content can be a list of parts, but for text, a string is fine.
@@ -374,7 +404,7 @@ def chat_api():
             model_reply = gemini_response.text
 
         else:
-            error_message = f"Model '{selected_model}' is not recognized or supported."
+            error_message = f"Model '{selected_model_ui_name}' is not recognized or supported."
             return jsonify({"error": error_message}), 501 # Not Implemented
 
     except openai.APIError as e:
@@ -383,12 +413,12 @@ def chat_api():
         error_message = f"Anthropic API Error: {str(e)}"
     except Exception as e: # Catch-all for other errors, including Google specific ones for now
         if hasattr(e, 'message') and e.message: # General exception message
-             error_message = f"Error with {selected_model}: {e.message}"
+             error_message = f"Error with {selected_model_ui_name}: {e.message}"
         elif hasattr(e, 'args') and e.args: # Some exceptions store messages in args
-            error_message = f"Error with {selected_model}: {e.args[0] if e.args else str(e)}"
+            error_message = f"Error with {selected_model_ui_name}: {e.args[0] if e.args else str(e)}"
         else:
-            error_message = f"An unexpected error occurred with {selected_model}: {str(e)}"
-        print(f"Error details for {selected_model}: {type(e).__name__} - {str(e)}") # Log detailed error
+            error_message = f"An unexpected error occurred with {selected_model_ui_name}: {str(e)}"
+        print(f"Error details for {selected_model_ui_name}: {type(e).__name__} - {str(e)}") # Log detailed error
 
     if error_message:
         return jsonify({"error": error_message}), 500
@@ -448,6 +478,34 @@ def send_revit_command():
         return jsonify({"status": "error", "message": error_msg}), 500
 
 if __name__ == '__main__':
-    # Ensure templates and static folders are correctly referenced if script is run directly
-    # This is usually handled by Flask when run with `flask run` but good for `python server.py`
-    app.run(debug=DEBUG_MODE, port=PORT, host='0.0.0.0') 
+    print(f"--- Starting Flask development server on host 0.0.0.0, port {PORT} ---")
+    print(f"--- Debug mode for app.run is: {DEBUG_MODE} ---")
+    if not app.logger.handlers and DEBUG_MODE:
+        import logging
+        # Use sys.stdout for the stream handler
+        handler = logging.StreamHandler(sys.stdout) # Ensure sys is imported if not already
+        handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        app.logger.addHandler(handler)
+        app.logger.setLevel(logging.DEBUG)
+        app.logger.info("--- Explicitly configured StreamHandler for app.logger ---")
+
+    try:
+        # Restore reloader for development convenience
+        app.run(debug=DEBUG_MODE, port=PORT, host='0.0.0.0')
+    except OSError as e:
+        # Error codes can vary slightly by OS, but 10048 (Windows) and 98 (Linux/macOS often) are common for "address in use"
+        # Python 3.3+ e.errno can be used for cross-platform error numbers like EADDRINUSE
+        import errno
+        if e.errno == errno.EADDRINUSE or (hasattr(e, 'winerror') and e.winerror == 10048): 
+            print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print(f"!!! CRITICAL ERROR: Port {PORT} is already in use by another process. !!!")
+            print(f"!!! Please find and stop the other process, then try starting again.   !!!")
+            print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            # Optionally, exit with a specific code if this script were to be monitored
+            # sys.exit(1) 
+        else:
+            print(f"!!! Unusual OSError during server startup: {e} (Error No: {e.errno}) !!!")
+    except Exception as e:
+        print(f"!!! An unexpected error occurred during server startup: {e} !!!") 

@@ -1,3 +1,4 @@
+# RevitMCP: This script runs in pyRevit (IronPython). Use Python 2.7 syntax (no f-strings, use 'except Exception, e:').
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
 """Stops the RevitMCP Revit-Side Listener Server."""

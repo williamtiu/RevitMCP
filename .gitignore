@@ -14,6 +14,13 @@ logs/
 *.log
 listener_logs/
 
+# User-specific runtime data (if it appears at repo root)
+# These are generated in the user's Documents folder at runtime by the app
+user_data/
+
+# User-specific RevitMCP settings (old path within extension, good to keep ignoring)
+RevitMCP/user_data/revitmcp_settings.json
+
 # OS generated files
 .DS_Store
 Thumbs.db

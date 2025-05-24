@@ -1,3 +1,5 @@
+# RevitMCP: This script runs in pyRevit (IronPython). Use Python 2.7 syntax (no f-strings, use 'except Exception, e:').
+# -*- coding: UTF-8 -*-
 """
 Revit-Side Listener for RevitMCP (IronPython)
 """
@@ -139,16 +141,23 @@ def configure_listener_logging():
     global logger
     if not logger.handlers: # Configure only if no handlers exist
         try:
-            # Path to MyRevitMCP.extension/listener_logs/revit_listener.log
-            # __file__ is the path to this listener.py script
-            # lib_dir = os.path.dirname(__file__) # MyRevitMCP.extension/lib/RevitMCP_RevitListener
-            # revitmcp_lib_dir = os.path.dirname(lib_dir) # MyRevitMCP.extension/lib
-            # extension_root = os.path.dirname(revitmcp_lib_dir) # MyRevitMCP.extension
+            # Use user's Documents folder instead of extension directory to avoid permission issues
+            import os
             
-            # Simpler path assuming __file__ is available and correct
-            current_script_dir = os.path.dirname(os.path.abspath(__file__))
-            extension_root = os.path.abspath(os.path.join(current_script_dir, '..', '..'))
-            log_dir = os.path.join(extension_root, 'listener_logs')
+            # Get the user's Documents folder
+            try:
+                # Try to get the user's Documents folder
+                user_documents = os.path.expanduser("~/Documents")
+                if not os.path.exists(user_documents):
+                    # Fallback: try Windows Documents folder path
+                    username = os.environ.get('USERNAME', 'User')
+                    user_documents = os.path.join("C:", "Users", username, "Documents")
+            except Exception:
+                # Final fallback: use temp directory
+                user_documents = os.environ.get('TEMP', 'C:\\temp')
+            
+            # Create RevitMCP logs directory in user's Documents
+            log_dir = os.path.join(user_documents, 'RevitMCP', 'listener_logs')
 
             if not os.path.exists(log_dir):
                 os.makedirs(log_dir)
