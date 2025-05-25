@@ -5,13 +5,14 @@ This server will handle requests from the Revit UI (via a listener)
 and can also host a web UI for direct interaction.
 """
 
-print("--- RevitMCP External Server script starting ---") # Early print diagnostic
-
-from flask import Flask, request, jsonify, render_template
-import requests # For sending requests to the Revit Listener (if needed in future)
 import os
-import json # For parsing conversation history if it comes as a string
-import sys
+import sys # Ensure sys is imported for stdout/stderr redirection if used
+import logging
+import traceback # For detailed exception logging
+import json
+from flask import Flask, request, jsonify, render_template, send_from_directory
+import requests
+from flask_cors import CORS
 
 # LLM Libraries - Initialize them if needed, or do it per-request
 import openai
@@ -19,493 +20,498 @@ import anthropic
 import google.generativeai as genai
 from google.generativeai import types as google_types # For Tool and FunctionDeclaration
 
+# --- Centralized Logging Configuration ---
+USER_DOCUMENTS = os.path.expanduser("~/Documents")
+LOG_BASE_DIR = os.path.join(USER_DOCUMENTS, 'RevitMCP', 'server_logs')
+if not os.path.exists(LOG_BASE_DIR):
+    os.makedirs(LOG_BASE_DIR)
 
-app = Flask(__name__, template_folder='templates', static_folder='static')
+STARTUP_LOG_FILE = os.path.join(LOG_BASE_DIR, 'server_startup_error.log')
+APP_LOG_FILE = os.path.join(LOG_BASE_DIR, 'server_app.log')
 
-# --- Tool Definitions ---
-REVIT_TOOL_NAME = "get_revit_project_info"
-REVIT_TOOL_DESCRIPTION = "Retrieves detailed information about the currently open Revit project, such as project name, file path, Revit version, Revit build number, and active document title."
-
-# Using a dictionary to store provider-specific tool formats
-REVIT_TOOLS_SPEC = {
-    "openai": [
-        {
-            "type": "function",
-            "function": {
-                "name": REVIT_TOOL_NAME,
-                "description": REVIT_TOOL_DESCRIPTION,
-                "parameters": {"type": "object", "properties": {}}, # No parameters from LLM
-            },
-        }
-    ],
-    "anthropic": [
-        {
-            "name": REVIT_TOOL_NAME,
-            "description": REVIT_TOOL_DESCRIPTION,
-            "input_schema": {"type": "object", "properties": {}}, # No parameters from LLM
-        }
-    ],
-    "google": [
-        google_types.Tool(
-            function_declarations=[
-                google_types.FunctionDeclaration(
-                    name=REVIT_TOOL_NAME,
-                    description=REVIT_TOOL_DESCRIPTION,
-                    parameters={"type": "object", "properties": {}}, # No parameters from LLM
-                )
-            ]
-        )
-    ]
-}
-
-# --- End Tool Definitions ---
-
-# Configuration
-DEBUG_MODE = os.environ.get('FLASK_DEBUG_MODE', 'True').lower() == 'true'
-# Explicitly print DEBUG_MODE status
-print(f"--- Flask DEBUG_MODE is set to: {DEBUG_MODE} ---")
-PORT = int(os.environ.get('FLASK_PORT', 8000))
-REVIT_LISTENER_URL = "http://localhost:8001/send_revit_command" # Corrected: The listener itself is at 8001; send_revit_command is a route on *this* server.
-# The actual listener endpoint seems to be just http://localhost:8001 based on listener.py
-# The /send_revit_command route on this Flask server is what forwards to the listener.
-
-# Add a mapping for specific model IDs if they differ from the UI selector values
-ANTHROPIC_MODEL_ID_MAP = {
-    "claude-4-sonnet": "claude-sonnet-4-20250514", # Corrected based on web search
-    "claude-4-opus": "claude-opus-4-20250514",   # Corrected based on web search
-    "claude-3-7-sonnet": "claude-3-7-sonnet-20250219", # Verified
-    "claude-3-5-sonnet": "claude-3-5-sonnet-20240620", # Verified
-    # Add other claude models here if their UI name differs from API ID
-}
-
-@app.route('/', methods=['GET'])
-def chat_ui():
-    app.logger.info("Serving chat_ui (index.html)") # Test Flask logger
-    """Serves the main chat UI page."""
-    return render_template('index.html')
-
-# Add a new test route for logging
-@app.route('/test_log', methods=['GET'])
-def test_log_route():
-    print("--- PRINT INSIDE /test_log ROUTE ---")
-    sys.stdout.write("--- SYS.STDOUT.WRITE INSIDE /test_log ROUTE ---\n")
-    sys.stdout.flush()
-    sys.stderr.write("--- SYS.STDERR.WRITE INSIDE /test_log ROUTE ---\n")
-    sys.stderr.flush()
-    app.logger.info("--- ACCESSED /test_log route successfully (app.logger.info) ---")
-    return jsonify({"status": "success", "message": "Test log route accessed. Check server console."}), 200
-
-@app.route('/chat_api', methods=['POST'])
-def chat_api():
-    """Handles messages from the chat UI and returns a model response."""
-    data = request.json
-    conversation_history = data.get('conversation')
-    api_key = data.get('apiKey')
-    selected_model_ui_name = data.get('model')
-
-    if not conversation_history or not isinstance(conversation_history, list) or not conversation_history[-1].get('content'):
-        return jsonify({"error": "No message or invalid conversation history provided"}), 400
-    if not selected_model_ui_name:
-        return jsonify({"error": "No model selected"}), 400
-    
-    user_message_content = conversation_history[-1]['content'].strip()
-
-    # --- Helper function to call Revit Listener ---
-    def call_revit_listener(command_name: str, payload_data: dict = None):
-        revit_listener_direct_url = "http://localhost:8001" 
-        payload = {"command": command_name}
-        if payload_data:
-            payload.update(payload_data)
-        
-        print(f"External Server: Calling Revit Listener: {command_name} with payload {payload}")
-        try:
-            listener_response = requests.post(
-                revit_listener_direct_url, 
-                json=payload, 
-                headers={'Content-Type': 'application/json'},
-                timeout=20 # Increased timeout slightly
-            )
-            listener_response.raise_for_status()
-            response_json = listener_response.json()
-
-            if response_json.get("status") == "success":
-                print(f"External Server: Revit Listener success for {command_name}: {response_json.get('data', {})}")
-                return json.dumps(response_json.get("data", {})) # Return data as JSON string
-            else:
-                error_detail = response_json.get("message", "Unknown error from Revit Listener")
-                print(f"External Server: Error from Revit Listener ({command_name}): {error_detail}")
-                return json.dumps({"error": error_detail, "details": response_json.get("details")})
-        except requests.exceptions.ConnectionError:
-            error_msg = f"External Server: Could not connect to the Revit Listener for command {command_name}. Is it running?"
-            print(error_msg)
-            return json.dumps({"error": error_msg})
-        except requests.exceptions.Timeout:
-            error_msg = f"External Server: Request to Revit Listener for command {command_name} timed out."
-            print(error_msg)
-            return json.dumps({"error": error_msg})
-        except requests.exceptions.RequestException as e:
-            error_msg = f"External Server: Error communicating with Revit Listener for {command_name}: {str(e)}"
-            print(error_msg)
-            return json.dumps({"error": error_msg})
-        except Exception as e: # Catch-all for other errors like JSON parsing
-            error_msg = f"External Server: An unexpected error occurred processing Revit Listener response for {command_name}: {str(e)}"
-            print(error_msg)
-            return json.dumps({"error": error_msg})
-    # --- End Helper function ---
-
-    # --- Revit Command Trigger --- 
-    if "revit project info" in user_message_content.lower() and selected_model_ui_name == 'echo_model': # Keep for echo model for now
-        print(f"User requested Revit project info via keyword for echo_model. Calling listener directly.")
-        # Directly call listener and format for echo (or simple direct reply)
-        listener_output_str = call_revit_listener(REVIT_TOOL_NAME)
-        try:
-            listener_output_data = json.loads(listener_output_str)
-            if "error" in listener_output_data:
-                return jsonify({"reply": f"Error from Revit: {listener_output_data['error']}"})
-            
-            formatted_info = "Revit Project Information (direct call):\\n"
-            for key, value in listener_output_data.items():
-                display_key = key.replace('_', ' ').capitalize()
-                formatted_info += f"- {display_key}: {value}\\n"
-            return jsonify({"reply": formatted_info.strip()})
-        except json.JSONDecodeError:
-            return jsonify({"reply": f"Revit listener returned non-JSON: {listener_output_str}"})
-    # --- End Revit Command Trigger ---
-
-    # Proceed with LLM call if not a Revit command handled above
-    user_message = user_message_content # Original variable name for LLM part
-
-    # API key is required for all non-echo models
-    if selected_model_ui_name != 'echo_model' and not api_key:
-        return jsonify({"error": "API key is required for this model"}), 400
-
-    model_reply = ""
-    error_message = None
-
+# Configure a specific logger for startup/global errors
+startup_logger = logging.getLogger('RevitMCPServerStartup')
+startup_logger.setLevel(logging.DEBUG)
+# Clear previous startup log if it exists
+if os.path.exists(STARTUP_LOG_FILE):
     try:
-        if selected_model_ui_name == 'echo_model':
-            model_reply = (
-                f"Server echoes: '{user_message}'. "
-                f"Model selected: '{selected_model_ui_name}'. "
-                f"API Key provided: '{bool(api_key)}'. "
-                f"History items: {len(conversation_history)}."
-            )
-        
-        # --- OpenAI Models --- 
-        elif selected_model_ui_name.startswith('gpt-') or selected_model_ui_name.startswith('o3'):
-            # --- OpenAI Tool Definitions (Localized due to previous edit issues) ---
-            REVIT_TOOL_NAME_OPENAI = "get_revit_project_info"
-            REVIT_TOOL_DESCRIPTION_OPENAI = "Retrieves detailed information about the currently open Revit project, such as project name, file path, Revit version, Revit build number, and active document title."
-            openai_tool_spec = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": REVIT_TOOL_NAME_OPENAI,
-                        "description": REVIT_TOOL_DESCRIPTION_OPENAI,
-                        "parameters": {"type": "object", "properties": {}}, # No parameters from LLM
-                    },
-                }
-            ]
+        os.remove(STARTUP_LOG_FILE)
+    except Exception:
+        # If removal fails, just proceed, it will be appended.
+        pass
+startup_file_handler = logging.FileHandler(STARTUP_LOG_FILE)
+startup_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+startup_logger.addHandler(startup_file_handler)
+startup_logger.info("--- Server script attempting to start ---")
 
-            # --- Helper function to call Revit Listener (Localized) ---
-            def call_revit_listener_for_openai(command_name: str, payload_data: dict = None):
-                revit_listener_direct_url = "http://localhost:8001" 
-                payload = {"command": command_name}
-                if payload_data:
-                    payload.update(payload_data)
-                
-                print(f"External Server (OpenAI): Calling Revit Listener: {command_name} with payload {payload}")
-                try:
-                    listener_response = requests.post(
-                        revit_listener_direct_url, 
-                        json=payload, 
-                        headers={'Content-Type': 'application/json'},
-                        timeout=20
+def configure_flask_logger(app_instance, debug_mode):
+    """Configures the Flask app's logger."""
+    # File handler for Flask app logs
+    file_handler = logging.FileHandler(APP_LOG_FILE, mode='a') # Append mode
+    file_handler.setLevel(logging.DEBUG if debug_mode else logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    # Remove default handlers if any, to avoid duplicate console logs from Flask
+    # For example, Flask's default debug handler.
+    # This is tricky as app.logger might get handlers from various places.
+    # A common approach is to set propagate to False if you fully manage handlers.
+    # app_instance.logger.propagate = False 
+    
+    # Clear existing handlers on app.logger to avoid duplicates if script is re-run in some contexts
+    for handler in list(app_instance.logger.handlers):
+        app_instance.logger.removeHandler(handler)
+
+    app_instance.logger.addHandler(file_handler)
+    
+    # Console handler for debug mode
+    if debug_mode:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(formatter)
+        app_instance.logger.addHandler(console_handler)
+        app_instance.logger.setLevel(logging.DEBUG)
+        app_instance.logger.info("Flask app logger: Configured for DEBUG mode (file and console).")
+    else:
+        app_instance.logger.setLevel(logging.INFO)
+        app_instance.logger.info("Flask app logger: Configured for INFO mode (file only).")
+# --- End Centralized Logging Configuration ---
+
+try:
+    startup_logger.info("--- RevitMCP External Server script starting (inside main try block) ---")
+    print("--- RevitMCP External Server script starting (Python print) ---") # For immediate console feedback
+
+    app = Flask(__name__, template_folder='templates', static_folder='static')
+    CORS(app) # Enable CORS for all routes and origins by default
+    
+    # Configuration
+    DEBUG_MODE = os.environ.get('FLASK_DEBUG_MODE', 'True').lower() == 'true'
+    PORT = int(os.environ.get('FLASK_PORT', 8000))
+    
+    # Configure Flask's logger AFTER app initialization and DEBUG_MODE is set
+    configure_flask_logger(app, DEBUG_MODE)
+    app.logger.info("Flask app initialized. Debug mode: %s. Port: %s.", DEBUG_MODE, PORT)
+    print(f"--- Flask DEBUG_MODE is set to: {DEBUG_MODE} (from print) ---")
+
+    # --- Tool Definitions ---
+    REVIT_INFO_TOOL_NAME = "get_revit_project_info"
+    REVIT_INFO_TOOL_DESCRIPTION = "Retrieves detailed information about the currently open Revit project, such as project name, file path, Revit version, Revit build number, and active document title."
+
+    # New Get Revit View Tool
+    GET_REVIT_VIEW_TOOL_NAME = "get_revit_view"
+    GET_REVIT_VIEW_TOOL_DESCRIPTION = "Retrieves and displays a specific view from the current Revit project as an image. Use this if the user asks to see, show, or get a particular Revit view by its name."
+    GET_REVIT_VIEW_TOOL_PARAMETERS = {
+        "type": "object",
+        "properties": {
+            "view_name": {
+                "type": "string",
+                "description": "The exact name of the Revit view to retrieve and display."
+            }
+        },
+        "required": ["view_name"]
+    }
+
+    REVIT_TOOLS_SPEC = {
+        "openai": [
+            {
+                "type": "function",
+                "function": {
+                    "name": REVIT_INFO_TOOL_NAME,
+                    "description": REVIT_INFO_TOOL_DESCRIPTION,
+                    "parameters": {"type": "object", "properties": {}}, 
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": GET_REVIT_VIEW_TOOL_NAME,
+                    "description": GET_REVIT_VIEW_TOOL_DESCRIPTION,
+                    "parameters": GET_REVIT_VIEW_TOOL_PARAMETERS,
+                },
+            }
+        ],
+        "anthropic": [
+            {
+                "name": REVIT_INFO_TOOL_NAME,
+                "description": REVIT_INFO_TOOL_DESCRIPTION,
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": GET_REVIT_VIEW_TOOL_NAME,
+                "description": GET_REVIT_VIEW_TOOL_DESCRIPTION,
+                "input_schema": GET_REVIT_VIEW_TOOL_PARAMETERS,
+            }
+        ],
+        "google": [
+            google_types.Tool(
+                function_declarations=[
+                    google_types.FunctionDeclaration(
+                        name=REVIT_INFO_TOOL_NAME,
+                        description=REVIT_INFO_TOOL_DESCRIPTION,
+                        parameters={"type": "object", "properties": {}}
+                    ),
+                    google_types.FunctionDeclaration(
+                        name=GET_REVIT_VIEW_TOOL_NAME,
+                        description=GET_REVIT_VIEW_TOOL_DESCRIPTION,
+                        parameters=GET_REVIT_VIEW_TOOL_PARAMETERS
                     )
-                    listener_response.raise_for_status()
-                    response_json = listener_response.json()
-
-                    if response_json.get("status") == "success":
-                        print(f"External Server (OpenAI): Revit Listener success for {command_name}: {response_json.get('data', {})}")
-                        return json.dumps(response_json.get("data", {})) 
-                    else:
-                        error_detail = response_json.get("message", "Unknown error from Revit Listener")
-                        print(f"External Server (OpenAI): Error from Revit Listener ({command_name}): {error_detail}")
-                        return json.dumps({"error": error_detail, "details": response_json.get("details")})
-                except requests.exceptions.RequestException as e:
-                    error_msg = f"External Server (OpenAI): Error communicating with Revit Listener for {command_name}: {str(e)}"
-                    print(error_msg)
-                    return json.dumps({"error": error_msg})
-                except Exception as e:
-                    error_msg = f"External Server (OpenAI): An unexpected error occurred processing Revit Listener response for {command_name}: {str(e)}"
-                    print(error_msg)
-                    return json.dumps({"error": error_msg})
-            # --- End Helper ---
-
-            client = openai.OpenAI(api_key=api_key)
-            messages_for_openai = []
-            for msg in conversation_history:
-                role = msg.get('role')
-                content = msg.get('content')
-                if role == 'bot': 
-                    role = 'assistant'
-                if role and content:
-                    messages_for_openai.append({"role": role, "content": content})
-            
-            if not messages_for_openai:
-                 raise ValueError("Message list for OpenAI cannot be empty after filtering.")
-
-            print(f"External Server (OpenAI): Sending to OpenAI: {messages_for_openai}, tools: {openai_tool_spec}")
-            completion = client.chat.completions.create(
-                model=selected_model_ui_name,
-                messages=messages_for_openai,
-                tools=openai_tool_spec,
-                tool_choice="auto", 
+                ]
             )
+        ]
+    }
+    app.logger.info("Tool specs defined.")
+
+    # Add a mapping for specific model IDs if they differ from the UI selector values
+    ANTHROPIC_MODEL_ID_MAP = {
+        "claude-4-sonnet": "claude-sonnet-4-20250514", # Corrected based on web search
+        "claude-4-opus": "claude-opus-4-20250514",   # Corrected based on web search
+        "claude-3-7-sonnet": "claude-3-7-sonnet-20250219", # Verified
+        "claude-3-5-sonnet": "claude-3-5-sonnet-20240620", # Verified
+        # Add other claude models here if their UI name differs from API ID
+    }
+    app.logger.info("Configuration loaded.")
+
+    @app.route('/', methods=['GET'])
+    def chat_ui():
+        app.logger.info("Serving chat_ui (index.html)") # Test Flask logger
+        """Serves the main chat UI page."""
+        return render_template('index.html')
+
+    # Add a new test route for logging
+    @app.route('/test_log', methods=['GET'])
+    def test_log_route():
+        print("--- PRINT INSIDE /test_log ROUTE ---")
+        sys.stdout.write("--- SYS.STDOUT.WRITE INSIDE /test_log ROUTE ---\n")
+        sys.stdout.flush()
+        sys.stderr.write("--- SYS.STDERR.WRITE INSIDE /test_log ROUTE ---\n")
+        sys.stderr.flush()
+        app.logger.info("--- ACCESSED /test_log route successfully (app.logger.info) ---")
+        return jsonify({"status": "success", "message": "Test log route accessed. Check server console."}), 200
+
+    @app.route('/chat_api', methods=['POST'])
+    def chat_api():
+        """Handles messages from the chat UI and returns a model response."""
+        data = request.json
+        conversation_history = data.get('conversation')
+        api_key = data.get('apiKey')
+        selected_model_ui_name = data.get('model')
+        user_message_content = conversation_history[-1]['content'].strip()
+        final_response_to_frontend = {}
+        image_output_for_frontend = None
+        model_reply = ""
+        error_message = None
+
+        # Existing call_revit_listener helper function (for POST requests to the listener)
+        # This function is now central for all Revit interactions.
+        def call_revit_listener(command_name: str, payload_data: dict = None):
+            revit_listener_direct_url = "http://localhost:8001"
+            payload = {"command": command_name}
+            if payload_data:
+                 # Ensure payload_data is structured under a 'data' key if listener expects it
+                 # Based on project_info_tool, listener might not expect a nested 'data' key for args.
+                 # If command expects arguments directly, merge them.
+                 # For export_revit_view, we want { "command": "export_revit_view", "view_name": "..." } or similar
+                 # Let's assume for now the listener can handle additional keys alongside "command".
+                payload.update(payload_data) # e.g. payload becomes {"command": "export_revit_view", "view_name": "L1"}
             
-            response_message = completion.choices[0].message
-            tool_calls = response_message.tool_calls
-
-            if tool_calls:
-                print(f"External Server (OpenAI): Received tool calls: {tool_calls}")
-                # For now, we only handle one tool call, the Revit project info.
-                # In the future, you might loop through tool_calls if multiple can be returned.
-                messages_for_openai.append(response_message) # Add assistant's reply with tool call
-
-                for tool_call in tool_calls:
-                    if tool_call.function.name == REVIT_TOOL_NAME_OPENAI:
-                        function_args = json.loads(tool_call.function.arguments) # Should be empty for this tool
-                        
-                        print(f"External Server (OpenAI): Executing tool '{tool_call.function.name}' with args: {function_args}")
-                        tool_output_json_str = call_revit_listener_for_openai(REVIT_TOOL_NAME_OPENAI)
-                        
-                        messages_for_openai.append(
-                            {
-                                "tool_call_id": tool_call.id,
-                                "role": "tool",
-                                "name": REVIT_TOOL_NAME_OPENAI,
-                                "content": tool_output_json_str, # Result of the function call
-                            }
-                        )
-                
-                print(f"External Server (OpenAI): Sending to OpenAI again with tool results: {messages_for_openai}")
-                second_completion = client.chat.completions.create(
-                    model=selected_model_ui_name,
-                    messages=messages_for_openai
-                    # No tools or tool_choice here, we want a text response
+            print(f"External Server: Calling Revit Listener: POST to {revit_listener_direct_url} with payload {payload}")
+            try:
+                listener_response = requests.post(
+                    revit_listener_direct_url, 
+                    json=payload, 
+                    headers={'Content-Type': 'application/json'},
+                    timeout=60 # Increased timeout for potentially long view exports
                 )
-                model_reply = second_completion.choices[0].message.content
-            else:
-                model_reply = response_message.content
+                listener_response.raise_for_status() # Raises HTTPError for 4xx/5xx responses
+                response_json = listener_response.json()
 
-        # --- Anthropic Models --- 
-        elif selected_model_ui_name.startswith('claude-'):
-            client = anthropic.Anthropic(api_key=api_key)
-            # Use the mapping to get the correct model ID for the API call
-            actual_anthropic_model_id = ANTHROPIC_MODEL_ID_MAP.get(selected_model_ui_name, selected_model_ui_name)
-            
-            messages_for_anthropic = []
-            
-            for msg in conversation_history:
-                role = msg.get('role')
-                content = msg.get('content')
-                if role and content:
-                    # Ensure content is a list of blocks for Anthropic tool use if needed later
-                    # For now, simple text content is fine for user/assistant messages.
-                    if role == 'bot':
-                        messages_for_anthropic.append({"role": "assistant", "content": content})
-                    else: 
-                        messages_for_anthropic.append({"role": "user", "content": content})
-            
-            if not messages_for_anthropic or messages_for_anthropic[-1]["role"] != "user":
-                raise ValueError("Anthropic requires the last message to be from the user, or message list is empty.")
+                if response_json.get("status") == "success":
+                    print(f"External Server: Revit Listener success for {command_name}: {response_json.get('data', {})}")
+                    return response_json
+                else:
+                    error_detail = response_json.get("message", "Unknown error from Revit Listener")
+                    print(f"External Server: Error from Revit Listener ({command_name}): {error_detail}")
+                    return {"status": "error", "message": error_detail, "details": response_json.get("details")}
+            except requests.exceptions.ConnectionError:
+                error_msg_conn = f"External Server: Could not connect to the Revit Listener for command {command_name}. Is it running on {revit_listener_direct_url}?"
+                print(error_msg_conn)
+                return {"status": "error", "message": error_msg_conn}
+            except requests.exceptions.Timeout:
+                error_msg_timeout = f"External Server: Request to Revit Listener for command {command_name} timed out."
+                print(error_msg_timeout)
+                return {"status": "error", "message": error_msg_timeout}
+            except requests.exceptions.RequestException as e_req: # Catches HTTPError from raise_for_status too
+                error_msg_prefix = f"External Server: Error communicating with Revit Listener for {command_name}"
+                
+                if hasattr(e_req, 'response') and e_req.response is not None:
+                    status_code = e_req.response.status_code
+                    reason = e_req.response.reason
+                    error_msg_comm = f"{error_msg_prefix}: HTTP {status_code} {reason}"
+                    try:
+                        listener_json_error = e_req.response.json()
+                        error_detail_from_listener = listener_json_error.get("message", f"Listener returned HTTP {status_code} but no specific error message in JSON response.")
+                        listener_status = listener_json_error.get("status", "error")
+                        listener_details = listener_json_error.get("details")
+                        print(f"{error_msg_comm}. Listener detailed error: {error_detail_from_listener}")
+                        return {"status": listener_status, "message": f"Listener Error ({status_code}): {error_detail_from_listener}", "details": listener_details}
+                    except ValueError: # Response from listener was not JSON
+                        error_detail_from_listener_text = e_req.response.text
+                        print(f"{error_msg_comm}. Listener response (not JSON): {error_detail_from_listener_text[:300]}") # Log snippet
+                        return {"status": "error", "message": f"{error_msg_comm}. Raw response: {error_detail_from_listener_text[:200]}"}
+                else:
+                    # Original error if no response attribute (e.g. DNS failure, connection refused before response)
+                    error_msg_comm = f"{error_msg_prefix}: {str(e_req)}"
+                    print(error_msg_comm)
+                    return {"status": "error", "message": error_msg_comm}
+            except Exception as e_gen: 
+                error_msg_gen = f"External Server: An unexpected error occurred processing Revit Listener response for {command_name}: {str(e_gen)}"
+                print(error_msg_gen)
+                return {"status": "error", "message": error_msg_gen}
+        # --- End Helper function ---
 
-            print(f"External Server (Anthropic): Sending to Anthropic with model_id: {actual_anthropic_model_id}")
-            
-            # Initial call to Anthropic with tools
-            response = client.messages.create(
-                model=actual_anthropic_model_id,
-                max_tokens=1024,
-                messages=messages_for_anthropic,
-                tools=REVIT_TOOLS_SPEC["anthropic"],
-                tool_choice={"type": "auto"} # Let Anthropic decide if to use a tool
-            )
+        try:
+            if selected_model_ui_name == 'echo_model':
+                model_reply = f"Echo: {user_message_content}"
 
-            # Check if the model wants to use a tool
-            if response.stop_reason == "tool_use":
-                tool_use_block = next((block for block in response.content if block.type == "tool_use"), None)
-                if tool_use_block and tool_use_block.name == REVIT_TOOL_NAME:
-                    tool_input = tool_use_block.input # Should be empty for this tool
-                    tool_id = tool_use_block.id
-                    print(f"External Server (Anthropic): Received tool use request for '{REVIT_TOOL_NAME}' with ID '{tool_id}' and input: {tool_input}")
+            # --- OpenAI Models --- 
+            elif selected_model_ui_name.startswith('gpt-') or selected_model_ui_name.startswith('o3'):
+                client = openai.OpenAI(api_key=api_key)
+                messages_for_openai = []
+                for msg in conversation_history: # Simplified history prep
+                    messages_for_openai.append({"role": "assistant" if msg['role'] == 'bot' else msg['role'], "content": msg['content']})
+                
+                completion = client.chat.completions.create(model=selected_model_ui_name, messages=messages_for_openai, tools=REVIT_TOOLS_SPEC['openai'], tool_choice="auto")
+                response_message = completion.choices[0].message
+                tool_calls = response_message.tool_calls
 
-                    # Call the Revit listener
-                    tool_output_json_str = call_revit_listener(REVIT_TOOL_NAME)
+                if tool_calls:
+                    messages_for_openai.append(response_message)
+                    for tool_call in tool_calls:
+                        function_name = tool_call.function.name
+                        function_args = json.loads(tool_call.function.arguments)
+                        tool_output_data_for_llm = {}
+
+                        if function_name == REVIT_INFO_TOOL_NAME:
+                            listener_result = call_revit_listener(REVIT_INFO_TOOL_NAME) # No specific args needed from LLM
+                            tool_output_data_for_llm = listener_result.get('data', listener_result) # Pass data or full error
+                        elif function_name == GET_REVIT_VIEW_TOOL_NAME:
+                            view_name_arg = function_args.get("view_name")
+                            if view_name_arg:
+                                # Listener expects args directly in payload for this hypothetical command
+                                listener_result = call_revit_listener("export_revit_view", {"view_name": view_name_arg})
+                                if listener_result.get("status") == "success" and listener_result.get("data", {}).get("image_data"):
+                                    image_output_for_frontend = listener_result["data"] # Contains image_data, content_type
+                                    tool_output_data_for_llm = {"status": "success", "message": f"Image for '{view_name_arg}' retrieved and will be displayed."}
+                                else:
+                                    tool_output_data_for_llm = listener_result # Forward error/status to LLM
+                            else:
+                                tool_output_data_for_llm = {"status": "error", "message": "View name was not provided by the model."}
+                        
+                        messages_for_openai.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": json.dumps(tool_output_data_for_llm)})
                     
-                    # Append the original assistant message (with the tool_use request)
-                    messages_for_anthropic.append({"role": "assistant", "content": response.content})
+                    second_completion = client.chat.completions.create(model=selected_model_ui_name, messages=messages_for_openai)
+                    model_reply = second_completion.choices[0].message.content
+                else:
+                    model_reply = response_message.content
+
+            # --- Anthropic Models --- 
+            elif selected_model_ui_name.startswith('claude-'):
+                client = anthropic.Anthropic(api_key=api_key)
+                actual_anthropic_model_id = ANTHROPIC_MODEL_ID_MAP.get(selected_model_ui_name, selected_model_ui_name)
+                messages_for_anthropic = [] # Simplified history prep
+                for msg in conversation_history: messages_for_anthropic.append({"role": "assistant" if msg['role'] == 'bot' else msg['role'], "content": msg['content']})
+
+                response = client.messages.create(model=actual_anthropic_model_id, max_tokens=2048, messages=messages_for_anthropic, tools=REVIT_TOOLS_SPEC['anthropic'], tool_choice={"type": "auto"})
+
+                if response.stop_reason == "tool_use":
+                    messages_for_anthropic.append({"role": "assistant", "content": response.content}) # Append current assistant turn
+                    tool_results_for_anthropic = []
+                    for tool_use_block in response.content:
+                        if tool_use_block.type == 'tool_use':
+                            tool_name = tool_use_block.name
+                            tool_input = tool_use_block.input
+                            tool_id = tool_use_block.id
+                            tool_output_data_for_llm = {}
+
+                            if tool_name == REVIT_INFO_TOOL_NAME:
+                                listener_result = call_revit_listener(REVIT_INFO_TOOL_NAME)
+                                tool_output_data_for_llm = listener_result.get('data', listener_result)
+                            elif tool_name == GET_REVIT_VIEW_TOOL_NAME:
+                                view_name_arg = tool_input.get("view_name")
+                                if view_name_arg:
+                                    listener_result = call_revit_listener("export_revit_view", {"view_name": view_name_arg})
+                                    if listener_result.get("status") == "success" and listener_result.get("data", {}).get("image_data"):
+                                        image_output_for_frontend = listener_result["data"]
+                                        tool_output_data_for_llm = {"status": "success", "message": f"Image for '{view_name_arg}' retrieved."}
+                                    else:
+                                        tool_output_data_for_llm = listener_result
+                                else:
+                                    tool_output_data_for_llm = {"status": "error", "message": "View name not provided by model."}
+                            
+                            tool_results_for_anthropic.append({"type": "tool_result", "tool_use_id": tool_id, "content": json.dumps(tool_output_data_for_llm)})
                     
-                    # Append the tool result message
-                    messages_for_anthropic.append({
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_id,
-                                "content": tool_output_json_str # Content can be a string or list of blocks
-                                # Consider sending structured JSON content if tool_output_json_str is complex
-                                # For now, sending the JSON string as content.
-                            }
-                        ]
-                    })
+                    messages_for_anthropic.append({"role": "user", "content": tool_results_for_anthropic}) # Follow up with tool results as user role
                     
-                    print(f"External Server (Anthropic): Sending tool results back to Anthropic: {messages_for_anthropic}")
-                    # Second call to get the final response from the model
-                    second_response = client.messages.create(
-                        model=actual_anthropic_model_id,
-                        max_tokens=1024,
-                        messages=messages_for_anthropic
-                        # No tools or tool_choice here, we expect a text response
-                    )
+                    second_response = client.messages.create(model=actual_anthropic_model_id, max_tokens=2048, messages=messages_for_anthropic)
                     if second_response.content and second_response.content[0].type == "text":
                         model_reply = second_response.content[0].text
                     else:
                         model_reply = "Anthropic model responded with non-text content after tool use."
                         print(f"External Server (Anthropic): Unexpected response after tool use: {second_response.content}")
 
+                elif response.content and response.content[0].type == "text":
+                    model_reply = response.content[0].text
                 else:
-                    model_reply = "Anthropic model requested an unknown or unhandled tool."
-                    print(f"External Server (Anthropic): Unhandled tool use block: {tool_use_block}")
-            
-            elif response.content and response.content[0].type == "text":
-                model_reply = response.content[0].text
+                    model_reply = "Anthropic model returned an unexpected response type."
+                    print(f"External Server (Anthropic): Unexpected initial response: {response.content}")
+
+            # --- Google Gemini Models --- 
+            elif selected_model_ui_name.startswith('gemini-'):
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel(selected_model_ui_name, tools=REVIT_TOOLS_SPEC['google'])
+                gemini_history = [] # Simplified history prep
+                for msg in conversation_history[:-1]: gemini_history.append({'role': 'user' if msg['role'] == 'user' else 'model', 'parts': [msg['content']]})
+                
+                chat_session = model.start_chat(history=gemini_history)
+                gemini_response = chat_session.send_message(conversation_history[-1]['content'])
+                function_call = gemini_response.candidates[0].content.parts[0].function_call if gemini_response.candidates and gemini_response.candidates[0].content.parts and gemini_response.candidates[0].content.parts[0].function_call else None
+                
+                if function_call:
+                    function_name = function_call.name
+                    args = {key: value for key, value in function_call.args.items()}
+                    tool_output_data_for_llm = None
+
+                    if function_name == REVIT_INFO_TOOL_NAME:
+                        listener_result = call_revit_listener(REVIT_INFO_TOOL_NAME)
+                        tool_output_data_for_llm = listener_result.get('data', listener_result)
+                    elif function_name == GET_REVIT_VIEW_TOOL_NAME:
+                        view_name_arg = args.get("view_name")
+                        if view_name_arg:
+                            listener_result = call_revit_listener("export_revit_view", {"view_name": view_name_arg})
+                            if listener_result.get("status") == "success" and listener_result.get("data", {}).get("image_data"):
+                                image_output_for_frontend = listener_result["data"]
+                                tool_output_data_for_llm = {"status": "success", "message": f"Image for '{view_name_arg}' retrieved."}
+                            else:
+                                tool_output_data_for_llm = listener_result
+                        else:
+                            tool_output_data_for_llm = {"status": "error", "message": "View name not provided by Gemini."}
+
+                    gemini_response_after_tool = chat_session.send_message(google_types.Part(function_response=google_types.FunctionResponse(name=function_name, response=tool_output_data_for_llm)))
+                    model_reply = gemini_response_after_tool.text
+                else:
+                    model_reply = gemini_response.text
             else:
-                model_reply = "Anthropic model returned an unexpected response type."
-                print(f"External Server (Anthropic): Unexpected initial response: {response.content}")
+                error_message = f"Model '{selected_model_ui_name}' is not recognized or supported."
 
-        # --- Google Gemini Models --- (Updated for google-generativeai >= 0.4.0)
-        elif selected_model_ui_name.startswith('gemini-'):
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(selected_model_ui_name)
+        except Exception as e:
+            # ... (existing detailed error logging and message preparation) ...
+            error_message = f"An unexpected error occurred: {str(e)}"
+            app.logger.error(f"Chat API error: {type(e).__name__} - {str(e)}", exc_info=True)
 
-            # Gemini expects alternating user/model roles. History needs to be mapped.
-            # Content can be a list of parts, but for text, a string is fine.
-            gemini_history = [] 
-            for msg in conversation_history[:-1]: # Process all but the last user message for history
-                role = msg.get('role')
-                content = msg.get('content')
-                if role == 'user':
-                    gemini_history.append({'role': 'user', 'parts': [content]})
-                elif role == 'bot' or role == 'assistant': # Gemini uses 'model' for bot replies
-                    gemini_history.append({'role': 'model', 'parts': [content]})
+        final_response_to_frontend["reply"] = model_reply
+        if image_output_for_frontend:
+            final_response_to_frontend["image_output"] = image_output_for_frontend
+        
+        if error_message and not model_reply: # If an error occurred and no model reply was formed
+            return jsonify({"error": error_message}), 500
+        elif error_message: # If an error occurred but model might have a partial reply
+            final_response_to_frontend["error_detail"] = error_message # Add error as extra info
+            return jsonify(final_response_to_frontend)
+        else:
+            return jsonify(final_response_to_frontend)
+
+    @app.route('/send_revit_command', methods=['POST'])
+    def send_revit_command():
+        client_request_data = request.json
+        if not client_request_data or "command" not in client_request_data:
+            return jsonify({"status": "error", "message": "Invalid request. 'command' is required."}), 400
+
+        revit_command_payload = client_request_data
+        
+        # This is the actual URL for the listener itself, not this server's route
+        actual_revit_listener_url = "http://localhost:8001" 
+
+        print("External Server (/send_revit_command route): Received request from client: {}".format(client_request_data))
+        print("External Server (/send_revit_command route): Forwarding command '{}' to Revit Listener at {}".format(revit_command_payload.get('command'), actual_revit_listener_url))
+
+        try:
+            response_from_revit = requests.post(
+                actual_revit_listener_url, 
+                json=revit_command_payload, 
+                headers={'Content-Type': 'application/json'}, 
+                timeout=30
+            )
+            response_from_revit.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
             
-            chat_session = model.start_chat(history=gemini_history)
-            gemini_response = chat_session.send_message(conversation_history[-1]['content']) # Send the latest user message
-            model_reply = gemini_response.text
+            revit_response_data = response_from_revit.json()
+            print("External Server: Received response from Revit Listener: {}".format(revit_response_data))
+            
+            return jsonify(revit_response_data), response_from_revit.status_code
 
-        else:
-            error_message = f"Model '{selected_model_ui_name}' is not recognized or supported."
-            return jsonify({"error": error_message}), 501 # Not Implemented
+        except requests.exceptions.ConnectionError as e:
+            error_msg = "External Server: Could not connect to Revit Listener at {}. Is it running? Error: {}".format(actual_revit_listener_url, e)
+            print(error_msg)
+            return jsonify({"status": "error", "message": error_msg}), 503 # Service Unavailable
+        except requests.exceptions.Timeout as e:
+            error_msg = "External Server: Request to Revit Listener timed out. Error: {}".format(e)
+            print(error_msg)
+            return jsonify({"status": "error", "message": error_msg}), 504 # Gateway Timeout
+        except requests.exceptions.RequestException as e:
+            error_msg = "External Server: Error communicating with Revit Listener. Error: {}".format(e)
+            print(error_msg)
+            error_details_text = "No response details available."
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_details_text = e.response.json()
+                except ValueError: # Not JSON
+                    error_details_text = e.response.text
+            return jsonify({"status": "error", "message": error_msg, "details": error_details_text}), \
+                   e.response.status_code if hasattr(e, 'response') and e.response is not None else 500
+        except Exception as e:
+            error_msg = "External Server: An unexpected error occurred. Error: {}".format(e)
+            print(error_msg)
+            return jsonify({"status": "error", "message": error_msg}), 500
 
-    except openai.APIError as e:
-        error_message = f"OpenAI API Error: {str(e)}"
-    except anthropic.APIError as e:
-        error_message = f"Anthropic API Error: {str(e)}"
-    except Exception as e: # Catch-all for other errors, including Google specific ones for now
-        if hasattr(e, 'message') and e.message: # General exception message
-             error_message = f"Error with {selected_model_ui_name}: {e.message}"
-        elif hasattr(e, 'args') and e.args: # Some exceptions store messages in args
-            error_message = f"Error with {selected_model_ui_name}: {e.args[0] if e.args else str(e)}"
-        else:
-            error_message = f"An unexpected error occurred with {selected_model_ui_name}: {str(e)}"
-        print(f"Error details for {selected_model_ui_name}: {type(e).__name__} - {str(e)}") # Log detailed error
+    if __name__ == '__main__':
+        startup_logger.info(f"--- Starting Flask development server on host 0.0.0.0, port {PORT} ---")
+        print(f"--- Debug mode for app.run is: {DEBUG_MODE} ---")
+        if not app.logger.handlers and DEBUG_MODE:
+            import logging
+            # Use sys.stdout for the stream handler
+            handler_main_log = logging.StreamHandler(sys.stdout) # Ensure sys is imported
+            handler_main_log.setLevel(logging.DEBUG)
+            formatter_main_log = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler_main_log.setFormatter(formatter_main_log)
+            app.logger.addHandler(handler_main_log)
+            app.logger.setLevel(logging.DEBUG)
+            app.logger.info("--- Explicitly configured StreamHandler for app.logger in __main__ ---")
 
-    if error_message:
-        return jsonify({"error": error_message}), 500
-    else:
-        return jsonify({"reply": model_reply})
+        try:
+            # Restore reloader for development convenience
+            startup_logger.info(f"Attempting to run Flask app with debug={DEBUG_MODE}")
+            app.run(debug=DEBUG_MODE, port=PORT, host='0.0.0.0')
+            startup_logger.info("Flask app.run() exited normally.") # Will only log if it exits gracefully
+        except OSError as e_os:
+            import errno
+            startup_logger.error(f"OS Error during server startup (app.run): {e_os} (Error No: {e_os.errno})", exc_info=True)
+            if e_os.errno == errno.EADDRINUSE or (hasattr(e_os, 'winerror') and e_os.winerror == 10048): # type: ignore
+                port_in_use_msg = f"ERROR: Port {PORT} is already in use. Please close the application using this port or change the FLASK_PORT environment variable."
+                startup_logger.error(port_in_use_msg)
+                print(port_in_use_msg) # Also print to console
+            else:
+                startup_logger.error(f"Unusual OSError during app.run: {e_os}", exc_info=True)
+                print(f"Unusual OSError: {e_os}")
+        except Exception as e_main_run:
+            startup_logger.error(f"Unexpected error during server startup (app.run in __main__): {e_main_run}", exc_info=True)
+            print(f"Unexpected error: {e_main_run}")
 
-@app.route('/send_revit_command', methods=['POST'])
-def send_revit_command():
-    client_request_data = request.json
-    if not client_request_data or "command" not in client_request_data:
-        return jsonify({"status": "error", "message": "Invalid request. 'command' is required."}), 400
-
-    revit_command_payload = client_request_data
-    
-    # This is the actual URL for the listener itself, not this server's route
-    actual_revit_listener_url = "http://localhost:8001" 
-
-    print("External Server (/send_revit_command route): Received request from client: {}".format(client_request_data))
-    print("External Server (/send_revit_command route): Forwarding command '{}' to Revit Listener at {}".format(revit_command_payload.get('command'), actual_revit_listener_url))
-
-    try:
-        response_from_revit = requests.post(
-            actual_revit_listener_url, 
-            json=revit_command_payload, 
-            headers={'Content-Type': 'application/json'}, 
-            timeout=30
-        )
-        response_from_revit.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
-        
-        revit_response_data = response_from_revit.json()
-        print("External Server: Received response from Revit Listener: {}".format(revit_response_data))
-        
-        return jsonify(revit_response_data), response_from_revit.status_code
-
-    except requests.exceptions.ConnectionError as e:
-        error_msg = "External Server: Could not connect to Revit Listener at {}. Is it running? Error: {}".format(actual_revit_listener_url, e)
-        print(error_msg)
-        return jsonify({"status": "error", "message": error_msg}), 503 # Service Unavailable
-    except requests.exceptions.Timeout as e:
-        error_msg = "External Server: Request to Revit Listener timed out. Error: {}".format(e)
-        print(error_msg)
-        return jsonify({"status": "error", "message": error_msg}), 504 # Gateway Timeout
-    except requests.exceptions.RequestException as e:
-        error_msg = "External Server: Error communicating with Revit Listener. Error: {}".format(e)
-        print(error_msg)
-        error_details_text = "No response details available."
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                error_details_text = e.response.json()
-            except ValueError: # Not JSON
-                error_details_text = e.response.text
-        return jsonify({"status": "error", "message": error_msg, "details": error_details_text}), \
-               e.response.status_code if hasattr(e, 'response') and e.response is not None else 500
-    except Exception as e:
-        error_msg = "External Server: An unexpected error occurred. Error: {}".format(e)
-        print(error_msg)
-        return jsonify({"status": "error", "message": error_msg}), 500
-
-if __name__ == '__main__':
-    print(f"--- Starting Flask development server on host 0.0.0.0, port {PORT} ---")
-    print(f"--- Debug mode for app.run is: {DEBUG_MODE} ---")
-    if not app.logger.handlers and DEBUG_MODE:
-        import logging
-        # Use sys.stdout for the stream handler
-        handler = logging.StreamHandler(sys.stdout) # Ensure sys is imported if not already
-        handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        app.logger.addHandler(handler)
-        app.logger.setLevel(logging.DEBUG)
-        app.logger.info("--- Explicitly configured StreamHandler for app.logger ---")
-
-    try:
-        # Restore reloader for development convenience
-        app.run(debug=DEBUG_MODE, port=PORT, host='0.0.0.0')
-    except OSError as e:
-        # Error codes can vary slightly by OS, but 10048 (Windows) and 98 (Linux/macOS often) are common for "address in use"
-        # Python 3.3+ e.errno can be used for cross-platform error numbers like EADDRINUSE
-        import errno
-        if e.errno == errno.EADDRINUSE or (hasattr(e, 'winerror') and e.winerror == 10048): 
-            print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print(f"!!! CRITICAL ERROR: Port {PORT} is already in use by another process. !!!")
-            print(f"!!! Please find and stop the other process, then try starting again.   !!!")
-            print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            # Optionally, exit with a specific code if this script were to be monitored
-            # sys.exit(1) 
-        else:
-            print(f"!!! Unusual OSError during server startup: {e} (Error No: {e.errno}) !!!")
-    except Exception as e:
-        print(f"!!! An unexpected error occurred during server startup: {e} !!!") 
+except Exception as e_global:
+    # Use the startup_logger for errors during initial script setup
+    startup_logger.error("!!!!!!!!!! GLOBAL SCRIPT EXECUTION ERROR !!!!!!!!!!")
+    startup_logger.error(str(e_global), exc_info=True)
+    # Try to print to console as a last resort
+    sys.stderr.write(f"GLOBAL SCRIPT ERROR: {e_global}\\n{traceback.format_exc()}\\n")
+    sys.stderr.write(f"Check '{STARTUP_LOG_FILE}' for details.\\n")
+finally:
+    startup_logger.info("--- Server script execution finished or encountered a global error ---")
+    # For debugging: input("Script finished or error occurred. Press Enter to exit...") 

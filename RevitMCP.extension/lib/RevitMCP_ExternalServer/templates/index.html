@@ -825,35 +825,20 @@
             if (!messageText) return;
 
             displayMessage('user', messageText);
-            messageInput.value = '';
-            statusDiv.textContent = 'Sending...';
             
             const selectedModelValue = modelSelector.value;
-            let apiKeyToUse = '';
-            let provider = '';
+            let apiKeyToUse = getApiKeyForModel(selectedModelValue); // Use existing helper
 
-            if (selectedModelValue.startsWith('gpt-') || selectedModelValue.startsWith('o3')) {
-                provider = 'openai';
-                apiKeyToUse = localStorage.getItem('revitMCP_openai_api_key') || '';
-            } else if (selectedModelValue.startsWith('claude-')) {
-                provider = 'anthropic';
-                apiKeyToUse = localStorage.getItem('revitMCP_anthropic_api_key') || '';
-            } else if (selectedModelValue.startsWith('gemini-')) {
-                provider = 'google';
-                apiKeyToUse = localStorage.getItem('revitMCP_google_api_key') || '';
-            }
-
-            if (selectedModelValue !== 'echo_model' && !apiKeyToUse) {
-                displayMessage('bot', `API Key for the selected model provider (${provider || 'unknown'}) is not set. Please configure it in Settings (⚙️).`);
-                statusDiv.textContent = 'API Key missing';
-                return;
-            }
-
+            // No longer need special parsing for /get_view, LLM handles it.
+            
             const payload = {
-                conversation: [...currentConversation],
+                conversation: [...currentConversation], // currentConversation includes the new user message from displayMessage
                 model: selectedModelValue,
                 apiKey: apiKeyToUse
             };
+            
+            messageInput.value = '';
+            statusDiv.textContent = 'Sending...';
 
             try {
                 const response = await fetch('/chat_api', {
@@ -868,7 +853,31 @@
                 }
 
                 const data = await response.json();
-                displayMessage('bot', data.reply);
+
+                // Display the main text reply from the LLM
+                if (data.reply) {
+                    displayMessage('bot', data.reply);
+                }
+
+                // Check if there's an image to display alongside the text reply
+                if (data.image_output && data.image_output.status === 'success') {
+                    displayImageOutput(data.image_output.image_data, data.image_output.content_type);
+                } else if (data.image_output && data.image_output.status === 'error') {
+                    // Optionally display a specific error if the image tool failed but LLM still replied
+                    console.warn("Image tool failed:", data.image_output.message);
+                    // You could display a small error message here too if desired, e.g.:
+                    // displayMessage('bot', `(Note: Could not retrieve image - ${data.image_output.message})`, false);
+                }
+
+                // Handle other tool_output or tool_error types if they are sent outside of image_output
+                // (This part might be less relevant if all tool interactions are now summarized by the LLM in data.reply)
+                if (data.reply_type === 'tool_output' && (!data.image_output || data.image_output.tool_name !== 'get_revit_view')) {
+                    displayToolOutput(data.data, data.tool_name || 'Tool'); 
+                } else if (data.reply_type === 'tool_error') {
+                    // This might be redundant if LLM incorporates tool errors into its main reply
+                    displayMessage('bot', `Tool Error (${data.tool_name || 'Unknown Tool'}): ${data.error || 'Unknown error'}`);
+                }
+
                 statusDiv.textContent = 'Ready';
 
             } catch (error) {
@@ -876,6 +885,34 @@
                 displayMessage('bot', `Error: ${error.message}`);
                 statusDiv.textContent = `Error: ${error.message.substring(0,100)}`;
             }
+        }
+
+        function displayImageOutput(imageData, contentType) {
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message', 'bot-message', 'image-output-message');
+
+            const img = document.createElement('img');
+            img.src = `data:${contentType};base64,${imageData}`;
+            img.alt = "Revit View Export";
+            img.style.maxWidth = '100%';
+            img.style.maxHeight = '500px'; // Limit image height
+            img.style.borderRadius = '8px';
+
+            messageDiv.appendChild(img);
+            messageLog.appendChild(messageDiv);
+            messageLog.scrollTop = messageLog.scrollHeight;
+
+            // Optionally save a placeholder or info about the image to conversation history
+            // currentConversation.push({ role: 'assistant', type: 'image_response', tool_name: 'get_revit_view', content: `Displayed image: ${contentType}` });
+            // saveCurrentChat();
+        }
+
+        function displayToolOutput(toolData, toolName) { // Modified to accept toolName
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message', 'bot-message', 'tool-output-message');
+            messageDiv.textContent = `Tool Output (${toolName || 'Tool'}): ${toolData || 'No output'}`;
+            messageLog.appendChild(messageDiv);
+            messageLog.scrollTop = messageLog.scrollHeight;
         }
 
         // Event listeners for UI elements (can be set up outside DOMContentLoaded as elements exist)
@@ -940,6 +977,17 @@
                 }
                 statusDiv.textContent = `Chat '${chatTitle}' deleted.`;
             }
+        }
+
+        function getApiKeyForModel(modelName) {
+            if (modelName.startsWith('gpt-') || modelName.startsWith('o3')) {
+                return localStorage.getItem('revitMCP_openai_api_key') || '';
+            } else if (modelName.startsWith('claude-')) {
+                return localStorage.getItem('revitMCP_anthropic_api_key') || '';
+            } else if (modelName.startswith('gemini-')) {
+                return localStorage.getItem('revitMCP_google_api_key') || '';
+            }
+            return ''; // For echo_model or other non-API models
         }
 
     </script>

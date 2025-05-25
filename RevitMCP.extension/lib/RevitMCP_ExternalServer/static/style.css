@@ -172,4 +172,31 @@ body {
     color: black;
     text-decoration: none;
     cursor: pointer;
+}
+
+.bot-message code { /* Inline code */
+    background-color: #f0f0f0;
+    color: #c7254e;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: "Courier New", Courier, monospace;
+}
+
+/* Styles for Image Output Messages */
+.image-output-message {
+    padding: 5px; /* Reduce padding for image messages if needed */
+    background-color: #e9ecef; /* Same as bot message or a bit different */
+}
+
+.image-output-message img {
+    max-width: 100%;
+    max-height: 60vh; /* Max height relative to viewport height */
+    border-radius: 8px;
+    border: 1px solid #ddd; /* Optional border */
+    display: block; /* Ensure it behaves as a block element */
+    margin-top: 5px; /* Space above image if text is ever added */
+}
+
+.bot-message h1, .bot-message h2, .bot-message h3 {
+    margin-top: 1em;
 } 

@@ -4,19 +4,39 @@
 Revit-Side Listener for RevitMCP (IronPython)
 """
 
-# Import necessary Revit API modules if possible (for linting/autocomplete)
-# try:
-#     import Autodesk
-#     import clr
-#     clr.AddReference('RevitAPI')
-#     clr.AddReference('RevitAPIUI')
-#     from Autodesk.Revit.DB import *
-#     from Autodesk.Revit.UI import *
-# except ImportError:
-#     print("Revit API modules not found. Running in a non-Revit environment or IronPython context needs setup.")
+# --- Revit API Imports ---
+# It's good practice to have these for clarity and potential linting, 
+# even if pyRevit injects them globally.
+try:
+    import clr
+    clr.AddReference('RevitAPI')
+    clr.AddReference('RevitAPIUI')
+    import Autodesk
+    from Autodesk.Revit.DB import (
+        FilteredElementCollector, 
+        View, # Assuming this is DB.View, adjust if it's Autodesk.Revit.DB.View directly
+        ImageExportOptions, 
+        ImageFileType, 
+        ImageResolution, # Added
+        ExportRange, 
+        ZoomFitType, 
+        ElementId
+    )
+    from Autodesk.Revit.UI import TaskDialog # Example UI import, not used yet
+    # For List[ElementId]
+    from System.Collections.Generic import List
+except ImportError:
+    print("Revit API modules not found. Ensure script is run in a Revit environment.")
+    # Define placeholders if script needs to be parsable outside Revit for some reason
+    # This is generally not recommended for production pyRevit scripts.
+    class DB: pass
+    class UI: pass 
+# --- End Revit API Imports ---
 
 import os
 import logging
+import tempfile # Added for view export
+import base64   # Added for view export
 
 try:
     # For Python 2.7 (IronPython)
@@ -58,80 +78,197 @@ class RevitListenerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         logger.info("POST request received.")
         content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
+        post_data_bytes = self.rfile.read(content_length)
         
         response_data = {}
         try:
-            # IronPython json might need explicit string decode from byte array
-            command_data = json.loads(post_data.decode('utf-8') if hasattr(post_data, 'decode') else post_data)
-            logger.info("Received command: %s", command_data)
+            command_data_str = post_data_bytes.decode('utf-8') if hasattr(post_data_bytes, 'decode') else post_data_bytes
+            command_data = json.loads(command_data_str)
+            logger.info("Received command data: %s", command_data)
 
-            # --- Command Processing Logic ---
             command_name = command_data.get("command")
-            logger.debug("Extracted command_name: '%s' (Type: %s)", command_name, type(command_name))
-            logger.debug("Is command_name == 'get_project_info': %s", command_name == "get_project_info")
+            logger.debug("Extracted command_name: '%s'", command_name)
 
-            # Access to __revit__ context (standard in pyRevit scripts)
-            # These would be None if run outside a proper pyRevit execution context.
+            doc = None
+            app = None
             try:
                 doc = __revit__.ActiveUIDocument.Document
                 app = __revit__.Application
                 logger.debug("Accessed doc and app from __revit__ context.")
-            except NameError: # __revit__ is not defined
-                doc = None
-                app = None
-                logger.warning("__revit__ context not found.")
+            except NameError: 
+                logger.warning("__revit__ context not found. Cannot access Revit document or application.")
+                # For commands that don't need doc/app, this might be fine. For others, it's an error.
 
+            if not doc or not app:
+                # Check if the command requires doc/app. If so, return error early.
+                commands_requiring_revit_context = ["get_document_title", "get_selected_element_ids", "get_revit_project_info", "export_revit_view"]
+                if command_name in commands_requiring_revit_context:
+                    response_data = {"status": "error", "message": "Revit document or application not accessible via __revit__ context."}
+                    self._set_response(status_code=500)
+                    self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                    logger.error("Command '%s' requires Revit context, but it was not found.", command_name)
+                    return
+            
+            # --- Command Processing Logic ---
             if command_name == "get_document_title":
-                if doc:
-                    doc_title = doc.Title
-                    response_data = {"status": "success", "data": {"title": doc_title}}
-                else:
-                    response_data = {"status": "error", "message": "Revit document not accessible."}
+                doc_title = doc.Title # Assumes doc is available due to check above
+                response_data = {"status": "success", "data": {"title": doc_title}}
                 self._set_response()
+
             elif command_name == "get_selected_element_ids":
-                if doc and hasattr(__revit__, 'ActiveUIDocument') and __revit__.ActiveUIDocument:
-                    try:
-                        selection = __revit__.ActiveUIDocument.Selection
-                        element_ids = [el_id.IntegerValue for el_id in selection.GetElementIds()]
-                        response_data = {"status": "success", "data": {"selected_ids": element_ids}}
-                    except Exception as sel_e:
-                        logger.error("Error getting selection: %s", sel_e, exc_info=True)
-                        response_data = {"status": "error", "message": "Error getting selection: {}".format(sel_e)}
-                else:
-                    response_data = {"status": "error", "message": "Revit document or UI document not accessible for selection."}
+                # Assumes doc and __revit__.ActiveUIDocument are available
+                try:
+                    selection = __revit__.ActiveUIDocument.Selection
+                    element_ids = [el_id.IntegerValue for el_id in selection.GetElementIds()]
+                    response_data = {"status": "success", "data": {"selected_ids": element_ids}}
+                except Exception as sel_e:
+                    logger.error("Error getting selection: %s", sel_e, exc_info=True)
+                    response_data = {"status": "error", "message": "Error getting selection: {}".format(sel_e)}
                 self._set_response()
+
             elif command_name == "get_revit_project_info":
                 logger.info("Processing 'get_revit_project_info' command.")
-                if project_info_tool and doc and app:
+                if project_info_tool: # Assumes doc & app are available
                     try:
-                        logger.info("Attempting to call project_info_tool.get_project_information...")
                         info = project_info_tool.get_project_information(doc, app)
-                        logger.info("project_info_tool.get_project_information returned: %s", info)
                         response_data = {"status": "success", "data": info}
                     except Exception as tool_e:
                         logger.error("Error executing project_info_tool: %s", tool_e, exc_info=True)
                         response_data = {"status": "error", "message": "Error executing project_info_tool: {}".format(tool_e)}
-                elif not project_info_tool:
-                    logger.warning("Project info tool not loaded.")
+                else:
                     response_data = {"status": "error", "message": "Project info tool not loaded."}
-                else: # doc or app missing
-                    logger.warning("Revit document or application not accessible for project info.")
-                    response_data = {"status": "error", "message": "Revit document or application not accessible for project info."}
                 self._set_response()
+
+            elif command_name == "export_revit_view":
+                logger.info("Processing 'export_revit_view' command.")
+                # view_name should be passed in the main payload, alongside "command"
+                view_name_to_export = command_data.get("view_name") 
+
+                if not view_name_to_export:
+                    response_data = {"status": "error", "message": "View name not provided for export."}
+                    self._set_response(status_code=400)
+                    self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                    return
+                else:
+                    try:
+                        output_folder = os.path.join(tempfile.gettempdir(), "RevitMCPExports")
+                        if not os.path.exists(output_folder):
+                            os.makedirs(output_folder)
+                        
+                        # Create a filename prefix that is less likely to clash if view names are similar
+                        # Using a simple prefix for now as Revit appends the view name anyway.
+                        file_path_prefix = os.path.join(output_folder, "revit_export") 
+                        
+                        target_view = None
+                        # Ensure View is correctly referenced (e.g. Autodesk.Revit.DB.View or just View if imported)
+                        all_views = FilteredElementCollector(doc).OfClass(Autodesk.Revit.DB.View).ToElements()
+                        for view_element in all_views:
+                            if view_element.Name == view_name_to_export:
+                                target_view = view_element
+                                break
+                        
+                        if not target_view:
+                            response_data = {"status": "error", "message": "View '{}' not found.".format(view_name_to_export)}
+                            self._set_response(status_code=404)
+                            self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                            return
+                        else:
+                            logger.info("Found view '{}' (ID: {}). Preparing export.".format(target_view.Name, target_view.Id.ToString()))
+                            ieo = ImageExportOptions()
+                            ieo.ExportRange = ExportRange.SetOfViews
+                            viewIds = List[ElementId]() 
+                            viewIds.Add(target_view.Id)
+                            ieo.SetViewsAndSheets(viewIds)
+                            ieo.FilePath = file_path_prefix 
+                            ieo.HLRandWFViewsFileType = ImageFileType.PNG
+                            ieo.ShadowViewsFileType = ImageFileType.PNG 
+                            ieo.ImageResolution = ImageResolution.DPI_150
+                            ieo.ZoomType = ZoomFitType.Zoom 
+                            ieo.Zoom = 100 
+                            
+                            # Ensure the view is suitable for export (e.g., not a schedule, legend without items might error)
+                            if not target_view.CanBePrinted:
+                                logger.warning("View '{}' cannot be printed/exported.".format(view_name_to_export))
+                                response_data = {"status": "error", "message": "View '{}' cannot be printed or exported.".format(view_name_to_export)}
+                                self._set_response(status_code=400)
+                                self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                                return
+                            else:
+                                logger.info("Exporting image with options: FilePath='{}', Resolution='{}', ZoomType='{}', Zoom='{}'".format(ieo.FilePath, ieo.ImageResolution, ieo.ZoomType, ieo.Zoom))
+                                doc.ExportImage(ieo)
+                                logger.info("doc.ExportImage() completed.")
+
+                                # Revit typically appends the view name to the FilePath if FilePath is a prefix.
+                                # Example: if FilePath is "C:\\temp\\export", output is "C:\\temp\\export-ViewName.png"
+                                # If FilePath is "C:\\temp\\export.png", output is "C:\\temp\\export.png"
+                                # Using a robust find method:
+                                exported_file_path_actual = ieo.GetSavedFileName(doc, target_view.Id) # Preferred way if API supports it
+                                if not exported_file_path_actual or not os.path.exists(exported_file_path_actual):
+                                    # Fallback to finding the newest PNG if GetSavedFileName isn't available/reliable for this context
+                                    logger.warning("GetSavedFileName did not return a valid path. Trying to find newest PNG.")
+                                    matching_files = [os.path.join(output_folder, f) for f in os.listdir(output_folder) if f.lower().endswith('.png')]
+                                    matching_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+                                    if not matching_files:
+                                        logger.error("Export failed - no image found after export attempt.")
+                                        response_data = {"status": "error", "message": "Export failed - no image found after export."}
+                                        self._set_response(status_code=500)
+                                        self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                                        return
+                                    else:
+                                        exported_file_path_actual = matching_files[0]
+                                        logger.info("Found newest exported file (fallback): %s", exported_file_path_actual)
+                                else:
+                                     logger.info("Exported file name from GetSavedFileName: %s", exported_file_path_actual)
+
+                                if os.path.exists(exported_file_path_actual):
+                                    with open(exported_file_path_actual, 'rb') as img_file:
+                                        img_data_bytes = img_file.read()
+                                   
+                                    encoded_base64_image_data = base64.b64encode(img_data_bytes).decode('utf-8')
+                                    content_type_str = "image/png"
+
+                                    try:
+                                        os.remove(exported_file_path_actual)
+                                        logger.info("Removed temporary exported file: %s", exported_file_path_actual)
+                                    except Exception as e_remove:
+                                        logger.warning("Could not remove temporary exported file {}: {}".format(exported_file_path_actual, e_remove))
+
+                                    response_data = {
+                                        "status": "success", 
+                                        "data": {
+                                            "image_data": encoded_base64_image_data,
+                                            "content_type": content_type_str,
+                                            "view_name": view_name_to_export,
+                                            "message": "View exported successfully."
+                                        }
+                                    }
+                                    self._set_response()
+                                else: # File still not found
+                                    logger.error("Exported file path determined as '%s' but file does not exist.", exported_file_path_actual)
+                                    response_data = {"status": "error", "message": "Exported image file not found at expected path after export."}
+                                    self._set_response(status_code=500)
+                                    self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                                    return
+
+                    except Exception as view_export_e:
+                        logger.error("Error during view export process for '{}': {}".format(view_name_to_export, view_export_e), exc_info=True)
+                        response_data = {"status": "error", "message": "Error during view export: {}".format(view_export_e)}
+                        self._set_response(status_code=500)
+                        self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                        return
             else:
                 response_data = {"status": "error", "message": "Unknown command: {}".format(command_name)}
                 self._set_response(status_code=400)
             # --- End Command Processing ---
 
         except Exception as e:
-            logger.error("Error processing request: %s", e, exc_info=True)
-            response_data = {"status": "error", "message": "Error processing request: {}".format(e)}
+            logger.error("Error processing POST request: %s", e, exc_info=True)
+            response_data = {"status": "error", "message": "Fatal error processing request: {}".format(e)}
             self._set_response(status_code=500)
         
         logger.debug("Preparing to send response: %s", response_data)
         self.wfile.write(json.dumps(response_data).encode('utf-8'))
-        logger.info("Response sent.")
+        logger.info("Response sent for command: '%s'", command_name)
 
 # Global variable to hold the server thread instance
 SERVER_THREAD = None
@@ -141,41 +278,21 @@ def configure_listener_logging():
     global logger
     if not logger.handlers: # Configure only if no handlers exist
         try:
-            # Use user's Documents folder instead of extension directory to avoid permission issues
-            import os
-            
-            # Get the user's Documents folder
-            try:
-                # Try to get the user's Documents folder
-                user_documents = os.path.expanduser("~/Documents")
-                if not os.path.exists(user_documents):
-                    # Fallback: try Windows Documents folder path
-                    username = os.environ.get('USERNAME', 'User')
-                    user_documents = os.path.join("C:", "Users", username, "Documents")
-            except Exception:
-                # Final fallback: use temp directory
-                user_documents = os.environ.get('TEMP', 'C:\\temp')
-            
-            # Create RevitMCP logs directory in user's Documents
-            log_dir = os.path.join(user_documents, 'RevitMCP', 'listener_logs')
+            user_documents = os.path.expanduser("~/Documents")
+            log_dir_path = os.path.join(user_documents, 'RevitMCP', 'listener_logs')
 
-            if not os.path.exists(log_dir):
-                os.makedirs(log_dir)
+            if not os.path.exists(log_dir_path):
+                os.makedirs(log_dir_path)
             
-            log_file = os.path.join(log_dir, 'revit_listener.log')
-
+            log_file_path = os.path.join(log_dir_path, 'revit_listener.log')
             logger.setLevel(logging.DEBUG)
-            
-            # File Handler
-            fh = logging.FileHandler(log_file, mode='a') # Append mode
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s')
+            fh = logging.FileHandler(log_file_path, mode='a')
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s')
             fh.setFormatter(formatter)
             logger.addHandler(fh)
-            
-            logger.info("Revit Listener logging configured to file: %s", log_file)
+            logger.info("Revit Listener logging configured: %s", log_file_path)
 
         except Exception as log_e:
-            # Fallback to print if logging setup fails
             print("CRITICAL: Failed to configure file logging for Revit Listener: {}".format(log_e))
 
 
@@ -187,14 +304,22 @@ def start_revit_listener_server():
 
     if SERVER_THREAD is not None and SERVER_THREAD.is_alive():
         logger.info("Listener server is already running.")
+        print("RevitMCP Listener is already running.") # Feedback for pyRevit console
         return
 
     def target():
         global HTTPD_INSTANCE
-        HTTPD_INSTANCE = HTTPServer((HOST_NAME, PORT_NUMBER), RevitListenerHandler)
-        logger.info("Listener starting on http://%s:%s in a new thread...", HOST_NAME, PORT_NUMBER)
-        HTTPD_INSTANCE.serve_forever()
-        logger.info("Listener thread finished.") # Should only print if serve_forever stops
+        try:
+            HTTPD_INSTANCE = HTTPServer((HOST_NAME, PORT_NUMBER), RevitListenerHandler)
+            logger.info("Listener starting on http://%s:%s...", HOST_NAME, PORT_NUMBER)
+            print("RevitMCP Listener starting on http://{}:{}.".format(HOST_NAME, PORT_NUMBER))
+            HTTPD_INSTANCE.serve_forever()
+        except Exception as e_server_start:
+            logger.error("Could not start listener server: %s", e_server_start, exc_info=True)
+            print("ERROR: Could not start RevitMCP Listener: {}".format(e_server_start))
+        finally:
+            logger.info("Listener server thread finished.")
+            print("RevitMCP Listener server thread finished.")
 
     SERVER_THREAD = threading.Thread(target=target)
     SERVER_THREAD.daemon = True  # Allow main program to exit even if thread is running
@@ -204,40 +329,53 @@ def start_revit_listener_server():
 def stop_revit_listener_server():
     """Stops the HTTP server if it's running."""
     global SERVER_THREAD, HTTPD_INSTANCE, logger
+    logger.info("Attempting to stop listener server...")
+    print("Attempting to stop RevitMCP Listener...")
     if HTTPD_INSTANCE:
-        logger.info("Attempting to stop listener server...")
-        HTTPD_INSTANCE.shutdown() # Signal serve_forever to stop
-        HTTPD_INSTANCE.server_close() # Close the server socket
-        HTTPD_INSTANCE = None
-        logger.info("Listener server shutdown initiated.")
+        try:
+            HTTPD_INSTANCE.shutdown()
+            HTTPD_INSTANCE.server_close()
+            HTTPD_INSTANCE = None
+            logger.info("HTTPD_INSTANCE shutdown and closed.")
+            print("RevitMCP Listener instance shut down.")
+        except Exception as e_shutdown:
+            logger.error("Error during HTTPD_INSTANCE shutdown: %s", e_shutdown, exc_info=True)
+            print("Error shutting down Listener instance: {}".format(e_shutdown))
     else:
-        logger.info("Listener server is not currently running or instance not found.")
+        logger.info("HTTPD_INSTANCE was not found (already None).")
+        print("RevitMCP Listener instance not found (already None).")
 
     if SERVER_THREAD is not None and SERVER_THREAD.is_alive():
-        SERVER_THREAD.join(timeout=5.0) # Wait for the thread to finish
+        SERVER_THREAD.join(timeout=5.0) 
         if SERVER_THREAD.is_alive():
             logger.warning("Listener server thread did not stop in time.")
+            print("WARNING: RevitMCP Listener thread did not stop in time.")
         else:
             logger.info("Listener server thread stopped.")
+            print("RevitMCP Listener thread stopped.")
         SERVER_THREAD = None
     else:
-        logger.info("Listener server thread is not running.")
+        logger.info("Listener server thread was not running or already None.")
+        print("RevitMCP Listener thread not running or already None.")
+    logger.info("stop_revit_listener_server completed.")
 
 def main(): # Kept for potential direct testing, but not primary use in pyRevit
     configure_listener_logging() # Configure logging for direct test mode too
-    logger.info("Initializing listener (direct test mode)...")
+    logger.info("Starting listener via __main__ (direct test mode)...")
     start_revit_listener_server()
-    logger.info("main() function called. Server should be running in a background thread.")
-    logger.info("To stop the server (direct test mode), interrupt (Ctrl+C).")
+    print("Listener started from __main__. Press Ctrl+C to stop.")
     if __name__ == "__main__":
         try:
             while True:
                 import time
-                time.sleep(1)
+                time.sleep(1) # Keep main thread alive
         except KeyboardInterrupt:
-            logger.info("Keyboard interrupt received. Stopping listener server...")
+            logger.info("Ctrl+C received in __main__. Stopping listener server...")
+            print("Ctrl+C received. Stopping listener...")
         finally:
             stop_revit_listener_server()
+            logger.info("Listener server stopped from __main__.")
+            print("Listener stopped from __main__.")
 
 # This main guard is for direct execution (e.g. ipy.exe listener.py)
 # For pyRevit, the button scripts will import this module and call 
