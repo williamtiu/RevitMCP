@@ -153,7 +153,25 @@ try:
     def select_elements_by_id_mcp_tool(element_ids: list[str]) -> dict:
         """Selects one or more elements in Revit using their Element IDs."""
         app.logger.info(f"MCP Tool executed: {SELECT_ELEMENTS_TOOL_NAME} with element_ids: {element_ids}")
-        return call_revit_listener(SELECT_ELEMENTS_TOOL_NAME, {"element_ids": element_ids})
+        
+        # Ensure element_ids is a list, even if a single string ID is passed by the LLM
+        if isinstance(element_ids, str):
+            app.logger.warning(f"select_elements_by_id_mcp_tool: element_ids was a string ('{element_ids}'), converting to list.")
+            processed_element_ids = [element_ids]
+        elif isinstance(element_ids, list) and all(isinstance(eid, str) for eid in element_ids):
+            processed_element_ids = element_ids
+        elif isinstance(element_ids, list): # List contains non-strings, attempt to convert or log error
+            app.logger.warning(f"select_elements_by_id_mcp_tool: element_ids list contained non-string items: {element_ids}. Attempting to convert all to strings.")
+            try:
+                processed_element_ids = [str(eid) for eid in element_ids]
+            except Exception as e_conv:
+                app.logger.error(f"select_elements_by_id_mcp_tool: Failed to convert all items in element_ids to string: {e_conv}")
+                return {"status": "error", "message": f"Invalid format for element_ids. All IDs must be strings. Received: {element_ids}"}
+        else:
+            app.logger.error(f"select_elements_by_id_mcp_tool: element_ids is not a string or a list of strings. Received type: {type(element_ids)}, value: {element_ids}")
+            return {"status": "error", "message": f"Invalid input type for element_ids. Expected string or list of strings. Received: {type(element_ids)}"}
+
+        return call_revit_listener(SELECT_ELEMENTS_TOOL_NAME, {"element_ids": processed_element_ids})
     
     app.logger.info("MCP tools defined and decorated.")
 
@@ -192,10 +210,10 @@ try:
     app.logger.info("Manual tool specs for LLMs defined.")
 
     ANTHROPIC_MODEL_ID_MAP = {
-        "claude-4-sonnet": "claude-3-sonnet-20240229", # Corrected to a known valid ID
-        "claude-4-opus": "claude-3-opus-20240229",   # Corrected
-        "claude-3-7-sonnet": "claude-3-haiku-20240307", # Example, use actual Sonnet 3.5 / Haiku
-        "claude-3-5-sonnet": "claude-3-5-sonnet-20240620",
+        "claude-4-sonnet": "claude-sonnet-4-20250514",    # Updated based on user's table
+        "claude-4-opus": "claude-opus-4-20250514",        # Updated based on user's table
+        "claude-3-7-sonnet": "claude-3-7-sonnet-20250219",  # Updated based on user's table
+        "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",  # Updated based on user's table
     }
     app.logger.info("Configuration loaded.")
 
