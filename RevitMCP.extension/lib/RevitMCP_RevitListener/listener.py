@@ -310,16 +310,36 @@ def start_revit_listener_server():
     def target():
         global HTTPD_INSTANCE
         try:
-            HTTPD_INSTANCE = HTTPServer((HOST_NAME, PORT_NUMBER), RevitListenerHandler)
-            logger.info("Listener starting on http://%s:%s...", HOST_NAME, PORT_NUMBER)
-            print("RevitMCP Listener starting on http://{}:{}.".format(HOST_NAME, PORT_NUMBER))
+            # Attempt to start the server
+            # It's important that this print statement, if it's the cause, is also handled
+            # or moved if it's not essential for the immediate startup logic.
+            logger.info("Listener starting on http://{}:{}...".format(HOST_NAME, PORT_NUMBER))
+            
+            server_address = (HOST_NAME, PORT_NUMBER)
+            HTTPD_INSTANCE = HTTPServer(server_address, RevitListenerHandler)
+            
+            # This print statement is the one identified in the traceback
+            try:
+                print("RevitMCP Listener starting on http://{}:{}.".format(HOST_NAME, PORT_NUMBER))
+            except SystemError as se_print:
+                logger.warning("Console print failed for listener start message (SystemError): %s. Attempting to continue server.", se_print)
+            
             HTTPD_INSTANCE.serve_forever()
-        except Exception as e_server_start:
-            logger.error("Could not start listener server: %s", e_server_start, exc_info=True)
-            print("ERROR: Could not start RevitMCP Listener: {}".format(e_server_start))
+
+        except SystemError as se: # Catch the specific STA error
+            logger.error("Could not start or run listener server (SystemError): %s", se, exc_info=True)
+            # Optionally, re-raise if you want the thread to terminate and signal failure
+            # raise
+        except Exception as e:
+            logger.error("Could not start or run listener server (General Exception): %s", e, exc_info=True)
+            # Optionally, re-raise
+            # raise
         finally:
             logger.info("Listener server thread finished.")
-            print("RevitMCP Listener server thread finished.")
+            try:
+                print("RevitMCP Listener server thread finished.")
+            except SystemError:
+                logger.warning("Console print failed for listener thread finished message (SystemError).")
 
     SERVER_THREAD = threading.Thread(target=target)
     SERVER_THREAD.daemon = True  # Allow main program to exit even if thread is running
