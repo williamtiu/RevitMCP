@@ -83,53 +83,35 @@ try:
     app.logger.info("FastMCP server instance created: %s", mcp_server.name)
 
     # --- Revit MCP API Communication ---
-    # Directly set the API base URL, bypassing discovery, based on the hypothesis
-    # that 'revit-mcp-v1' is a top-level API registered with pyRevit Routes.
-    REVIT_MCP_API_BASE_URL = "http://localhost:48884/revit-mcp-v1" # Corrected port to 48884 based on user confirmation
-    # PYREVIT_CORE_API_URL = "http://localhost:48887/pyrevit-core/apis" # No longer needed for discovery
-    # TARGET_MCP_API_NAME = 'revit-mcp-v1' # No longer needed for discovery
+    # Auto-detect which port the Revit MCP API is running on
+    REVIT_MCP_API_BASE_URL = None
+    POSSIBLE_PORTS = [48884, 48885, 48886]  # Common ports used by pyRevit
 
-    # def discover_revit_mcp_api_url(logger_instance, core_api_url_param, target_api_name_param):
-    #     """Attempts to discover the base URL of the RevitMCP API via pyRevit Core API."""
-    #     global REVIT_MCP_API_BASE_URL
-    #     if REVIT_MCP_API_BASE_URL:
-    #         return True
-    #     logger_instance.info(f"Attempting to discover RevitMCP API ({target_api_name_param}) via {core_api_url_param}")
-    #     try:
-    #         response = requests.get(core_api_url_param, timeout=10)
-    #         response.raise_for_status()
-    #         core_apis = response.json()
-    #         if isinstance(core_apis, list):
-    #             for api_info in core_apis:
-    #                 if isinstance(api_info, dict) and api_info.get('name') == target_api_name_param:
-    #                     core_api_base_parts = core_api_url_param.split('/')
-    #                     if len(core_api_base_parts) >= 3:
-    #                         pyrevit_server_base = f"{core_api_base_parts[0]}//{core_api_base_parts[2]}"
-    #                         REVIT_MCP_API_BASE_URL = f"{pyrevit_server_base}/{target_api_name_param}"
-    #                         logger_instance.info(f"Successfully discovered RevitMCP API URL: {REVIT_MCP_API_BASE_URL}")
-    #                         return True
-    #                     else:
-    #                         logger_instance.error(f"Could not parse pyRevit server base from {core_api_url_param}")
-    #                         return False
-    #             logger_instance.warning(f"RevitMCP API '{target_api_name_param}' not found in pyRevit Core API list.")
-    #         else:
-    #             logger_instance.warning(f"pyRevit Core API response was not a list as expected. Response: {core_apis}")
-    #         return False
-    #     except requests.exceptions.RequestException as e_req:
-    #         status_code_info = ""
-    #         response_text_info = ""
-    #         if hasattr(e_req, 'response') and e_req.response is not None:
-    #             status_code_info = f" (Status code: {e_req.response.status_code})"
-    #             try:
-    #                 response_text_info = f" Response text: {e_req.response.text[:500]}" # Log first 500 chars
-    #             except Exception as e_resp_text:
-    #                 response_text_info = f" Error reading response text: {e_resp_text}"
-    #         logger_instance.error(f"Error discovering RevitMCP API URL from {core_api_url_param}: {e_req}{status_code_info}.{response_text_info}")
-    #         return False
-    #     except Exception as e_disc:
-    #         logger_instance.error(f"Unexpected error during RevitMCP API URL discovery: {e_disc}", exc_info=True)
-    #         return False
-    # --- End Revit MCP API Communication ---
+    def detect_revit_mcp_port():
+        """Detect which port the Revit MCP API is running on by trying common ports."""
+        global REVIT_MCP_API_BASE_URL
+        
+        for port in POSSIBLE_PORTS:
+            test_url = f"http://localhost:{port}/revit-mcp-v1"
+            try:
+                # Try a simple connection test - just check if the port responds
+                response = requests.get(f"{test_url}/project_info", timeout=2)
+                if response.status_code in [200, 404, 405]:  # Any response means server is running
+                    REVIT_MCP_API_BASE_URL = test_url
+                    startup_logger.info(f"Detected Revit MCP API running on port {port}")
+                    print(f"--- Detected Revit MCP API on port {port} ---")
+                    return True
+            except requests.exceptions.RequestException:
+                # Port not responding, try next one
+                continue
+        
+        startup_logger.warning("Could not detect Revit MCP API on any common ports. Defaulting to 48884.")
+        print("--- Warning: Could not detect Revit MCP API port, defaulting to 48884 ---")
+        REVIT_MCP_API_BASE_URL = "http://localhost:48884/revit-mcp-v1"
+        return False
+
+    # Detect the correct port at startup
+    detect_revit_mcp_port()
 
     # --- Tool Name Constants (used for REVIT_TOOLS_SPEC and dispatch) ---
     REVIT_INFO_TOOL_NAME = "get_revit_project_info"
@@ -145,18 +127,18 @@ try:
 
         # Try to discover the API URL if not already set (Now REVIT_MCP_API_BASE_URL is set directly)
         if REVIT_MCP_API_BASE_URL is None: # This condition should ideally not be met anymore
-            logger_instance.error("Revit MCP API base URL is not set. This should not happen with direct configuration.")
-            # Fallback or error if direct setting failed or was reverted, though discover_revit_mcp_api_url is now commented.
-            # if not discover_revit_mcp_api_url(logger_instance, PYREVIT_CORE_API_URL, TARGET_MCP_API_NAME): # This call would fail as func is commented
-            #    logger_instance.error("Failed to discover Revit MCP API URL. Listener might not be running or accessible.")
-            return {"status": "error", "message": "Could not connect to Revit Listener: API URL not configured."}
+            logger_instance.error("Revit MCP API base URL is not set. Attempting auto-detection...")
+            if not detect_revit_mcp_port():
+                logger_instance.error("Failed to detect Revit MCP API port. Listener might not be running or accessible.")
+                return {"status": "error", "message": "Could not connect to Revit Listener: API URL not configured."}
             
         logger_instance.info(f"Using pre-configured Revit MCP API base URL: {REVIT_MCP_API_BASE_URL}")
 
-        full_url = REVIT_MCP_API_BASE_URL.rstrip('/') + "/" + command_path.lstrip('/')
-        logger_instance.debug(f"Calling Revit MCP API: {method} {full_url} with payload: {payload_data}")
+        def attempt_api_call():
+            """Attempt the actual API call with current URL."""
+            full_url = REVIT_MCP_API_BASE_URL.rstrip('/') + "/" + command_path.lstrip('/')
+            logger_instance.debug(f"Calling Revit MCP API: {method} {full_url} with payload: {payload_data}")
 
-        try:
             if method.upper() == 'POST':
                 listener_response = requests.post(
                     full_url, 
@@ -172,24 +154,40 @@ try:
                 )
             else:
                 logger_instance.error(f"Unsupported HTTP method: {method} for call_revit_listener")
-                return {"status": "error", "message": f"Unsupported HTTP method: {method}"}
+                raise ValueError(f"Unsupported HTTP method: {method}")
 
             listener_response.raise_for_status()
-            response_json = listener_response.json()
+            return listener_response.json()
+
+        # First attempt
+        try:
+            response_json = attempt_api_call()
             logger_instance.info(f"Revit MCP API success for {command_path}: {response_json}")
             return response_json
-        except requests.exceptions.ConnectionError:
-            msg = f"Could not connect to the Revit MCP API at {full_url} for command {command_path}."
+        except requests.exceptions.ConnectionError as conn_err:
+            logger_instance.warning(f"Connection failed to {REVIT_MCP_API_BASE_URL}. Attempting to re-detect port...")
+            
+            # Try to re-detect the port
+            old_url = REVIT_MCP_API_BASE_URL
+            if detect_revit_mcp_port() and REVIT_MCP_API_BASE_URL != old_url:
+                logger_instance.info(f"Port re-detected. Retrying with new URL: {REVIT_MCP_API_BASE_URL}")
+                try:
+                    response_json = attempt_api_call()
+                    logger_instance.info(f"Revit MCP API success after retry for {command_path}: {response_json}")
+                    return response_json
+                except Exception as retry_err:
+                    logger_instance.error(f"Retry failed: {retry_err}")
+            
+            # If re-detection didn't help or failed
+            msg = f"Could not connect to the Revit MCP API for command {command_path}. Tried {old_url} and {REVIT_MCP_API_BASE_URL}"
             logger_instance.error(msg)
-            # Reset base URL if connection fails, so it attempts rediscovery next time
-            # global REVIT_MCP_API_BASE_URL # This was correctly commented out/removed in previous steps
             return {"status": "error", "message": msg}
         except requests.exceptions.Timeout:
-            msg = f"Request to Revit MCP API at {full_url} for command {command_path} timed out."
+            msg = f"Request to Revit MCP API at {REVIT_MCP_API_BASE_URL} for command {command_path} timed out."
             logger_instance.error(msg)
             return {"status": "error", "message": msg}
         except requests.exceptions.RequestException as e_req:
-            msg_prefix = f"Error communicating with Revit MCP API at {full_url} for {command_path}"
+            msg_prefix = f"Error communicating with Revit MCP API at {REVIT_MCP_API_BASE_URL} for {command_path}"
             if hasattr(e_req, 'response') and e_req.response is not None:
                 status_code = e_req.response.status_code
                 try:
@@ -205,7 +203,7 @@ try:
                 logger_instance.error(f"{msg_prefix}: {e_req}", exc_info=True)
                 return {"status": "error", "message": f"{msg_prefix}: {e_req}"}
         except Exception as e_gen:
-            logger_instance.error(f"Unexpected error in call_revit_listener for {command_path} at {full_url}: {e_gen}", exc_info=True)
+            logger_instance.error(f"Unexpected error in call_revit_listener for {command_path} at {REVIT_MCP_API_BASE_URL}: {e_gen}", exc_info=True)
             return {"status": "error", "message": f"Unexpected error processing API response for {command_path}."}
 
     # --- MCP Tool Definitions using @mcp_server.tool() ---

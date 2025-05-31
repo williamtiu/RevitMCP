@@ -3,6 +3,7 @@
 from pyrevit import routes
 from pyrevit import script
 from pyrevit import DB # For explicit Revit API access if preferred
+from System.Collections.Generic import List # Add this import for .NET List
 # from Autodesk.Revit.DB import * # Alternative direct Revit API import
 
 logger = script.get_logger()
@@ -16,25 +17,20 @@ try:
 
     # Define the route for '/project_info' using a decorator
     @api.route('/project_info', methods=['GET'])
-    def handle_get_project_info(request_data):
+    def handle_get_project_info(request):
         """
         Handles GET requests to /revit-mcp-v1/project_info
         Returns basic information about the current Revit project.
         
         Args:
-            request_data (routes.Request): Object containing request details. Not used in this simple GET.
-                                           The pyRevit docs also show that you can request 'doc', 'uidoc', 'uiapp'
-                                           as arguments directly if your function needs them.
-                                           For example: def handle_get_project_info(doc, request_data):
+            request (routes.Request): Object containing request details.
         """
         route_logger = script.get_logger() # Use a logger instance for the route handler
         
         try:
             # __revit__ is a global object provided by pyRevit in the script's execution context.
             # It gives access to the Revit UIApplication object.
-            # Alternatively, if 'doc' is an argument to this function, pyRevit provides it.
-            
-            current_uiapp = __revit__ # Or pass 'uiapp' as an argument to this handler
+            current_uiapp = __revit__
             if not hasattr(current_uiapp, 'ActiveUIDocument') or not current_uiapp.ActiveUIDocument:
                 route_logger.error("Error accessing project info: No active UI document.")
                 return routes.Response(status=503, data={"error": "No active Revit UI document found. Is a project open?"})
@@ -73,37 +69,39 @@ try:
 
     # === NEW /elements/by_category ROUTE ===
     @api.route('/elements/by_category', methods=['GET'])
-    def handle_get_elements_by_category(doc, request_data):
+    def handle_get_elements_by_category(request):
         """
         Handles GET requests to /revit-mcp-v1/elements/by_category?category_name=OST_SomeCategory
         Returns a list of element IDs and names for the specified category.
         
         Args:
-            doc (Document): The active Revit document, injected by pyRevit.
-            request_data (routes.Request): Object containing request details.
+            request (routes.Request): Object containing request details.
         """
         route_logger = script.get_logger()
-        category_name_query = request_data.params.get('category_name') # Get from query parameters
+        category_name_query = request.params.get('category_name') # Get from query parameters
 
         if not category_name_query:
             route_logger.error("Missing 'category_name' query parameter.")
             return routes.Response(status=400, data={"error": "Missing 'category_name' query parameter. Use format: /elements/by_category?category_name=OST_YourCategory"})
 
-        if not doc:
-            route_logger.error("No active document available for /elements/by_category.")
-            return routes.Response(status=503, data={"error": "No active Revit project document."})
-
         try:
+            # Get the active document
+            current_uiapp = __revit__
+            if not hasattr(current_uiapp, 'ActiveUIDocument') or not current_uiapp.ActiveUIDocument:
+                route_logger.error("No active document available for /elements/by_category.")
+                return routes.Response(status=503, data={"error": "No active Revit project document."})
+            
+            doc = current_uiapp.ActiveUIDocument.Document
+            if not doc:
+                route_logger.error("No active document available for /elements/by_category.")
+                return routes.Response(status=503, data={"error": "No active Revit project document."})
+
             # Validate if the category_name is a valid BuiltInCategory
-            # DB is Autodesk.Revit.DB, needs to be imported or available (e.g. from pyrevit import DB)
-            # For safety, ensure DB is imported at the top of startup.py if not already.
-            # Assuming 'from pyrevit import DB' or similar is present at the top.
             built_in_category = None
             if hasattr(DB.BuiltInCategory, category_name_query):
                 built_in_category = getattr(DB.BuiltInCategory, category_name_query)
             else:
                 route_logger.error("Invalid category_name: '{}'. Not a recognized BuiltInCategory.".format(category_name_query))
-                # Try to list available categories for better error message - might be too verbose for here
                 return routes.Response(status=400, data={"error": "Invalid category_name: '{}'. It is not a recognized BuiltInCategory.".format(category_name_query)})
 
             elements_collector = DB.FilteredElementCollector(doc)\
@@ -132,66 +130,44 @@ try:
     logger.info("Route /elements/by_category for API 'revit-mcp-v1' defined in startup.py.")
 
     @api.route('/select_elements_by_category', methods=['POST'])
-    def handle_select_elements_by_category(doc, request_data): # ORIGINAL SIGNATURE
-        logger.info("======================================================================")
-        logger.info("Entering /select_elements_by_category handler")
-        logger.info("ARG 'doc' - Type: {}, Value: {}".format(type(doc), doc))
-        logger.info("ARG 'request_data' - Type: {}, Value: {}".format(type(request_data), request_data))
-        logger.info("======================================================================")
+    def handle_select_elements_by_category(request):
+        """
+        Handles POST requests to /revit-mcp-v1/select_elements_by_category
+        Selects elements in Revit by category name.
+        
+        Args:
+            request (routes.Request): Object containing request details.
+        """
+        route_logger = script.get_logger()
+        
+        if not request:
+            route_logger.error("Critical error: 'request' object is None.")
+            return routes.Response(status=500, data={"error": "Internal server error: 'request' object is None.", "details": "The 'request' object was not provided to the handler by pyRevit."})
 
-        if not doc:
-            logger.error("Critical error: 'doc' object is None or invalid.")
-            return routes.Response(status=500, data={"error": "Internal server error: 'doc' object is None or invalid.", "details": "The 'doc' object was not properly provided to the handler by pyRevit."})
-
-        if not request_data:
-            logger.error("Critical error: 'request_data' object is None.")
-            return routes.Response(status=500, data={"error": "Internal server error: 'request_data' object is None.", "details": "The 'request_data' object was not provided to the handler by pyRevit."})
-
-        # If request_data is not None, try to access its properties
         try:
-            logger.info("Attempting to access request_data.params: {}".format(getattr(request_data, 'params', 'N/A')))
-            logger.info("Attempting to access request_data.data: {}".format(getattr(request_data, 'data', 'N/A')))
-            
-            payload = request_data.data # This is where you get the JSON body
-            logger.info("Successfully accessed request_data.data. Type: {}, Value: {}".format(type(payload), payload))
+            # Access the JSON payload from the request
+            payload = request.data if hasattr(request, 'data') else None
+            route_logger.info("Successfully accessed request.data. Type: {}, Value: {}".format(type(payload), payload))
 
-        except Exception as e_req_access:
-            logger.error("Error accessing properties of 'request_data' object: {}".format(e_req_access), exc_info=True)
-            return routes.Response(status=500, data={"error": "Error accessing request_data properties", "details": str(e_req_access)})
+            if not payload or not isinstance(payload, dict):
+                route_logger.error("Request body (payload) is missing or not a valid JSON object.")
+                return routes.Response(status=400, data={"error": "Request body is missing or not a valid JSON object."})
 
-        # ... (rest of your logic: payload processing, category validation, element selection)
-        # Ensure this part is robust and uses the 'payload' variable correctly.
-        # For example:
-        if not payload or not isinstance(payload, dict):
-            logger.error("Request body (payload) is missing or not a valid JSON object.")
-            return routes.Response(status=400, data={"error": "Request body is missing or not a valid JSON object."})
-
-        category_name_payload = payload.get('category_name')
-        # ... rest of your implementation
-        # ... (ensure all paths return a value)
-
-        # Example of returning from the try block for the rest of your logic:
-        try:
-            # Get uidoc from __revit__ (moved here as it's part of main logic)
-            current_uiapp = __revit__
-            if not hasattr(current_uiapp, 'ActiveUIDocument') or not current_uiapp.ActiveUIDocument:
-                logger.error("Error in /select_elements_by_category: No active UI document.")
-                return routes.Response(status=503, data={"error": "No active Revit UI document found."})
-            uidoc = current_uiapp.ActiveUIDocument
-
-            # Sanity check for 'doc' consistency (optional)
-            if doc.PathName != uidoc.Document.PathName and doc.Title != uidoc.Document.Title:
-                logger.warning(
-                    "Injected 'doc' (Title: '{}', Path: '{}') might differ from 'uidoc.Document' (Title: '{}', Path: '{}'). Using injected 'doc'.".format(
-                        doc.Title, doc.PathName, uidoc.Document.Title, uidoc.Document.PathName
-                    )
-                )
+            category_name_payload = payload.get('category_name')
             
             if not category_name_payload:
-                logger.error("Missing 'category_name' in JSON body for /select_elements_by_category.")
+                route_logger.error("Missing 'category_name' in JSON body for /select_elements_by_category.")
                 return routes.Response(status=400, data={"error": "Missing 'category_name' in JSON request body."})
 
-            # --- Your existing logic for category validation and element selection ---
+            # Get uidoc from __revit__
+            current_uiapp = __revit__
+            if not hasattr(current_uiapp, 'ActiveUIDocument') or not current_uiapp.ActiveUIDocument:
+                route_logger.error("Error in /select_elements_by_category: No active UI document.")
+                return routes.Response(status=503, data={"error": "No active Revit UI document found."})
+            uidoc = current_uiapp.ActiveUIDocument
+            doc = uidoc.Document
+
+            # Category validation and element selection
             built_in_category = None
             if hasattr(DB.BuiltInCategory, category_name_payload):
                 built_in_category = getattr(DB.BuiltInCategory, category_name_payload)
@@ -200,12 +176,12 @@ try:
                     possible_ost_category = "OST_" + category_name_payload.replace(" ", "")
                     if hasattr(DB.BuiltInCategory, possible_ost_category):
                         built_in_category = getattr(DB.BuiltInCategory, possible_ost_category)
-                        logger.info("Interpreted category '{}' as '{}'.".format(category_name_payload, possible_ost_category))
+                        route_logger.info("Interpreted category '{}' as '{}'.".format(category_name_payload, possible_ost_category))
                     else:
-                        logger.error("Invalid category_name: '{}'. Not a recognized BuiltInCategory. Try OST_ format.".format(category_name_payload))
+                        route_logger.error("Invalid category_name: '{}'. Not a recognized BuiltInCategory. Try OST_ format.".format(category_name_payload))
                         return routes.Response(status=400, data={"error": "Invalid category_name: '{}'. Not recognized.".format(category_name_payload)})
                 else:
-                    logger.error("Invalid category_name: '{}'. Not a recognized BuiltInCategory.".format(category_name_payload))
+                    route_logger.error("Invalid category_name: '{}'. Not a recognized BuiltInCategory.".format(category_name_payload))
                     return routes.Response(status=400, data={"error": "Invalid category_name: '{}'.".format(category_name_payload)})
             
             elements_collector = DB.FilteredElementCollector(doc)\
@@ -216,23 +192,21 @@ try:
             element_ids_to_select = [el.Id for el in elements_collector]
 
             if not element_ids_to_select:
-                logger.info("No elements found for category '{}' to select.".format(category_name_payload))
+                route_logger.info("No elements found for category '{}' to select.".format(category_name_payload))
                 return {"status": "success", "message": "No elements found for category '{}'".format(category_name_payload), "selected_count": 0, "selected_ids": []}
 
-            uidoc.Selection.SetElementIds(element_ids_to_select)
+            # Convert Python list to .NET List[ElementId] for Revit API
+            element_ids_collection = List[DB.ElementId]()
+            for eid in element_ids_to_select:
+                element_ids_collection.Add(eid)
+                
+            uidoc.Selection.SetElementIds(element_ids_collection)
             
-            logger.info("Successfully selected {} elements for category '{}'.".format(len(element_ids_to_select), category_name_payload))
+            route_logger.info("Successfully selected {} elements for category '{}'.".format(len(element_ids_to_select), category_name_payload))
             return {"status": "success", "message": "{} elements of category '{}' selected.".format(len(element_ids_to_select), category_name_payload), "selected_count": len(element_ids_to_select), "selected_ids": [eid.IntegerValue for eid in element_ids_to_select]}
 
         except Exception as e_main_logic:
-            # Enhanced error logging for main logic exception
-            category_in_error_log = "UNKNOWN"
-            if 'payload' in locals() and isinstance(payload, dict):
-                category_in_error_log = payload.get('category_name', 'N/A in payload')
-            elif 'category_name_payload' in locals() and category_name_payload is not None:
-                 category_in_error_log = category_name_payload
-
-            logger.critical("Critical error in main logic of /select_elements_by_category for category '{}': {}".format(category_in_error_log, e_main_logic), exc_info=True)
+            route_logger.critical("Critical error in /select_elements_by_category: {}".format(e_main_logic), exc_info=True)
             return routes.Response(status=500, data={"error": "Internal server error during main logic.", "details": str(e_main_logic)})
 
     logger.info("Route /select_elements_by_category for API 'revit-mcp-v1' defined in startup.py.")
