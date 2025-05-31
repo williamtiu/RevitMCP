@@ -6,20 +6,20 @@
 # pyRevit automatically adds the extension's 'lib' folder to sys.path.
 # Modules (RevitMCP_RevitListener, RevitMCP_UI) placed in 'lib' are directly importable.
 
-print("pyRevit Button: Start External Server - Attempting to load UI manager...")
+print("pyRevit Button: Launch RevitMCP - Attempting to load UI manager...")
 
 import sys
 import traceback # Import traceback module
 
 try:
     from RevitMCP_UI import ui_manager 
-    print("[StartExtSrvBtn] Successfully imported ui_manager. Calling start_external_server...")
+    print("[LaunchRevitMCPBtn] Successfully imported ui_manager. Calling start_external_server...")
     ui_manager.start_external_server()
-    print("[StartExtSrvBtn] ui_manager.start_external_server() called.")
+    print("[LaunchRevitMCPBtn] ui_manager.start_external_server() called.")
     # from pyrevit import forms
     # forms.alert("External Server start initiated. Check console for details.", title="RevitMCP")
 except ImportError as ie:
-    print("ERROR [StartExtSrvBtn] ImportError occurred:")
+    print("ERROR [LaunchRevitMCPBtn] ImportError occurred:")
     print(str(ie))
     # For ImportError, traceback might point to the problematic import line
     formatted_traceback = traceback.format_exc()
@@ -34,7 +34,7 @@ except ImportError as ie:
         pass # Ignore if forms alert fails
 
 except SyntaxError as se:
-    print("ERROR [StartExtSrvBtn] SyntaxError occurred:")
+    print("ERROR [LaunchRevitMCPBtn] SyntaxError occurred:")
     # SyntaxError objects have filename, lineno, offset, text attributes
     error_details = "File: {}\nLine: {}\nOffset: {}\nLine Content: {}\nError: {}".format(
         se.filename,
@@ -56,7 +56,7 @@ except SyntaxError as se:
         pass # Ignore if forms alert fails
 
 except Exception as e:
-    print("ERROR [StartExtSrvBtn] An unexpected error occurred:")
+    print("ERROR [LaunchRevitMCPBtn] An unexpected error occurred:")
     error_type = type(e).__name__
     error_message = str(e)
     formatted_traceback = traceback.format_exc()
@@ -73,4 +73,4 @@ except Exception as e:
     except:
         pass # Ignore if forms alert fails
     # from pyrevit import forms
-    # forms.alert("An unexpected error occurred in RevitMCP.\nError: {}".format(e), title="RevitMCP Error") 
+    # forms.alert("An unexpected error occurred in RevitMCP.\nError: {}".format(e), title="RevitMCP Error")

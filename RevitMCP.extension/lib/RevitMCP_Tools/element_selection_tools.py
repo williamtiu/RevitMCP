@@ -4,9 +4,11 @@
 Tool for selecting elements in Revit.
 """
 
+from revit_api_utils import get_bic_by_name # Import from the new utility file
+
 try:
     import Autodesk
-    from Autodesk.Revit.DB import ElementId
+    from Autodesk.Revit.DB import ElementId, FilteredElementCollector # Added FilteredElementCollector
     from System.Collections.Generic import List # For List[ElementId]
 except ImportError:
     print("ERROR (element_selection_tools): Revit API modules not found. This script must run in Revit.")
@@ -16,6 +18,11 @@ except ImportError:
             class DB:
                 class ElementId:
                     def __init__(self, id_val): pass
+                class FilteredElementCollector:
+                    def __init__(self, doc): pass
+                    def OfCategory(self, bic): return self
+                    def WhereElementIsNotElementType(self): return self
+                    def ToElements(self): return []
     class List:
         def __init__(self, type_param): pass
         def Add(self, item): pass
@@ -125,3 +132,52 @@ def select_elements(doc, uidoc, element_id_strings, logger):
     except Exception as e_main:
         logger.error("ElementSelectionTool: Major error during selection process: %s", e_main, exc_info=True)
         return {"status": "error", "message": "A critical error occurred in Revit during the element selection process: {}".format(e_main)}, 500 
+
+def select_by_category(doc, uidoc, category_name_str, logger):
+    """
+    Selects all elements in Revit belonging to a specified category.
+
+    Args:
+        doc (Autodesk.Revit.DB.Document): The active Revit Document object.
+        uidoc (Autodesk.Revit.UIDocument): The active Revit UIDocument object.
+        category_name_str (str): The name of the category (e.g., "Windows", "OST_Walls").
+        logger: Logger instance for logging messages.
+
+    Returns:
+        tuple: (response_dict, status_code)
+               response_dict contains {"status": "success/error", "message": "...", "selected_count": X}
+               status_code is the HTTP status code.
+    """
+    if not doc or not uidoc:
+        logger.error("ElementSelectionTool: Document or UIDocument is not available for select_by_category.")
+        return {"status": "error", "message": "Revit document or UI document not accessible."}, 500
+
+    logger.info("ElementSelectionTool: Attempting to select elements by category: '{}'.".format(category_name_str))
+
+    built_in_category = get_bic_by_name(category_name_str, logger) # Use the imported function
+
+    if not built_in_category:
+        logger.warning("ElementSelectionTool: Category '{}' not found or not recognized.".format(category_name_str))
+        return {"status": "error", "message": "Category '{}' not found or not recognized.".format(category_name_str)}, 400
+    
+    try:
+        collector = FilteredElementCollector(doc).OfCategory(built_in_category).WhereElementIsNotElementType()
+        elements_to_select = collector.ToElements()
+        
+        element_ids_to_select = List[ElementId]()
+        for el in elements_to_select:
+            element_ids_to_select.Add(el.Id)
+        
+        if element_ids_to_select.Count > 0:
+            uidoc.Selection.SetElementIds(element_ids_to_select)
+            count = element_ids_to_select.Count
+            logger.info("ElementSelectionTool: Successfully selected {} elements of category '{}'.".format(count, category_name_str))
+            return {"status": "success", "message": "Selected {} elements of category '{}'.".format(count, category_name_str), "data": {"selected_count": count, "category_selected": category_name_str}}, 200
+        else:
+            uidoc.Selection.SetElementIds(List[ElementId]()) # Clear selection if no elements found
+            logger.info("ElementSelectionTool: No elements found for category '{}'. Selection cleared.".format(category_name_str))
+            return {"status": "success", "message": "No elements found to select for category '{}'.".format(category_name_str), "data": {"selected_count": 0, "category_selected": category_name_str}}, 200
+
+    except Exception as e:
+        logger.error("ElementSelectionTool: Error during selection by category '{}': {}".format(category_name_str, e), exc_info=True)
+        return {"status": "error", "message": "An error occurred while selecting elements by category '{}': {}".format(category_name_str, e)}, 500 

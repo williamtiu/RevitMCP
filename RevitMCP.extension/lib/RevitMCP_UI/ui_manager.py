@@ -40,12 +40,13 @@ MIN_PYTHON_VERSION = (3, 7)
 REQUIRED_PACKAGES = ["flask", "requests", "openai", "anthropic", "google-generativeai"]
 
 # Define subprocess creation flags for suppressing console windows on Windows
-subprocess_creation_flags = 0
+# subprocess_creation_flags = 0 # TEMPORARILY SET TO 0 FOR DEBUGGING
+subprocess_creation_flags = 0 # Default for non-Windows
 if os.name == 'nt':
     try:
         subprocess_creation_flags = subprocess.CREATE_NO_WINDOW
     except AttributeError: # Fallback if constant not found (should be available in subprocess)
-        subprocess_creation_flags = 0x08000000
+        subprocess_creation_flags = 0x08000000 # Also CREATE_NO_WINDOW
 
 # --- Settings File Management ---
 USER_DATA_DIR_NAME = "user_data"
@@ -370,12 +371,23 @@ def start_external_server():
         print("[UI_MANAGER] Using Python executable: {}".format(python_exe_to_use))
         try:
             env = os.environ.copy()
+            # Comment out or remove log file redirection
+            # log_file_path = os.path.join(LIB_ROOT, "revitmcp_server.log")
+            # print("[UI_MANAGER] External server stdout/stderr will be logged to: {}".format(log_file_path))
+            
+            # Open the log file in write mode to overwrite previous logs
+            # with open(log_file_path, 'w') as log_file:
             print("[UI_MANAGER] Starting Popen with command: {} {}".format(python_exe_to_use, EXTERNAL_SERVER_SCRIPT_PATH))
             SERVER_PROCESS = subprocess.Popen(
                 [python_exe_to_use, EXTERNAL_SERVER_SCRIPT_PATH],
                 env=env,
+                # stdout=log_file, # Removed to allow output to CMD
+                # stderr=log_file, # Removed to allow output to CMD
+                # For Windows, to avoid opening a new console window for the subprocess if it's a GUI-less script
+                # or if you want to explicitly manage its console.
+                # creationflags=subprocess.CREATE_NO_WINDOW # Keep this commented unless a separate window is not desired
             )
-            success_msg = "[UI_MANAGER] RevitMCP External Server process started. PID: {}. Its console window should appear.".format(SERVER_PROCESS.pid)
+            success_msg = "[UI_MANAGER] RevitMCP External Server process started. PID: {}. Its console window should appear.".format(SERVER_PROCESS.pid) # Updated message
             print(success_msg)
             show_alert(success_msg)
 

@@ -423,6 +423,11 @@
             background-color: #4a4a64;
         }
 
+        /* Styles for the tool call visual representation in bot messages */
+        .tool-call-visual {
+            border: 1px solid #007bff; /* Blue border */
+        }
+
     </style>
 </head>
 <body>
@@ -478,21 +483,24 @@
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal">
         <div class="modal-content">
-            <h2>API Key Settings</h2>
+            <span class="close-button" onclick="closeSettingsModal()">&times;</span>
+            <h2>Settings</h2>
             
             <label for="openai-api-key">OpenAI API Key:</label>
-            <input type="password" id="openai-api-key" placeholder="Enter OpenAI API Key">
+            <input type="password" id="openai-api-key" name="openai-api-key">
 
             <label for="anthropic-api-key">Anthropic API Key:</label>
-            <input type="password" id="anthropic-api-key" placeholder="Enter Anthropic API Key">
+            <input type="password" id="anthropic-api-key" name="anthropic-api-key">
 
             <label for="google-api-key">Google API Key:</label>
-            <input type="password" id="google-api-key" placeholder="Enter Google API Key">
-            
-            <div class="modal-buttons">
-                <button id="cancel-settings-button">Cancel</button>
-                <button id="save-settings-button">Save Settings</button>
-            </div>
+            <input type="password" id="google-api-key" name="google-api-key">
+
+            <label for="preferred-model">Preferred Model:</label>
+            <select id="preferred-model" name="preferred-model">
+                <!-- Options will be populated by JavaScript -->
+            </select>
+            <button onclick="saveSettings()">Save Settings</button>
+            <p id="settings-status"></p>
         </div>
     </div>
 
@@ -508,11 +516,12 @@
         // Settings Modal elements
         const settingsButton = document.getElementById('settings-button');
         const settingsModal = document.getElementById('settings-modal');
-        const saveSettingsButton = document.getElementById('save-settings-button');
-        const cancelSettingsButton = document.getElementById('cancel-settings-button');
+        const closeSettingsModalButton = settingsModal.querySelector('.close-button');
         const openaiApiKeyInput = document.getElementById('openai-api-key');
         const anthropicApiKeyInput = document.getElementById('anthropic-api-key');
         const googleApiKeyInput = document.getElementById('google-api-key');
+        const preferredModelSelect = document.getElementById('preferred-model');
+        const settingsStatus = document.getElementById('settings-status');
 
         // New top bar buttons
         const topBarToggleSidebarButton = document.getElementById('top-bar-toggle-sidebar');
@@ -565,41 +574,57 @@
             if (savedModel) {
                 modelSelector.value = savedModel;
             }
-            // Load API keys into modal (not strictly necessary on DOMContentLoaded, but good practice)
-            // This ensures modal is ready if user clicks settings immediately.
-            loadApiKeysToModal(); 
         });
 
         // --- Settings Modal Logic --- (listeners can be set up outside DOMContentLoaded)
-        settingsButton.addEventListener('click', () => {
-            loadApiKeysToModal();
-            settingsModal.style.display = 'block';
-        });
-
-        cancelSettingsButton.addEventListener('click', () => {
-            settingsModal.style.display = 'none';
-        });
-
-        saveSettingsButton.addEventListener('click', () => {
-            localStorage.setItem('revitMCP_openai_api_key', openaiApiKeyInput.value);
-            localStorage.setItem('revitMCP_anthropic_api_key', anthropicApiKeyInput.value);
-            localStorage.setItem('revitMCP_google_api_key', googleApiKeyInput.value);
-            settingsModal.style.display = 'none';
-            statusDiv.textContent = 'API Keys saved.';
-        });
-
-        function loadApiKeysToModal() {
+        function openSettingsModal() {
+            // Load current settings into the modal inputs
             openaiApiKeyInput.value = localStorage.getItem('revitMCP_openai_api_key') || '';
             anthropicApiKeyInput.value = localStorage.getItem('revitMCP_anthropic_api_key') || '';
             googleApiKeyInput.value = localStorage.getItem('revitMCP_google_api_key') || '';
-        }
-        
-        // Close modal if clicked outside of the content
-        window.addEventListener('click', (event) => {
-            if (event.target === settingsModal) {
-                settingsModal.style.display = 'none';
+            
+            // Populate the preferred model selector by copying options from the main model selector
+            preferredModelSelect.innerHTML = modelSelector.innerHTML;
+            // Set the selected value for the preferred model
+            const savedPreferredModel = localStorage.getItem('revitMCPselectedModel');
+            if (savedPreferredModel) {
+                preferredModelSelect.value = savedPreferredModel;
+            } else if (modelSelector.options.length > 0) {
+                preferredModelSelect.value = modelSelector.options[0].value; // Default to first option of main selector
             }
-        });
+
+            settingsModal.style.display = 'block';
+            settingsStatus.textContent = '';
+        }
+
+        function closeSettingsModal() {
+            settingsModal.style.display = 'none';
+        }
+
+        function saveSettings() {
+            localStorage.setItem('revitMCP_openai_api_key', openaiApiKeyInput.value.trim());
+            localStorage.setItem('revitMCP_anthropic_api_key', anthropicApiKeyInput.value.trim());
+            localStorage.setItem('revitMCP_google_api_key', googleApiKeyInput.value.trim());
+            localStorage.setItem('revitMCPselectedModel', preferredModelSelect.value);
+            
+            settingsStatus.textContent = 'Settings saved!';
+            // Update the main model selector as well if the preferred model changed
+            // populateModelSelector(modelSelector, true); // No longer needed, main selector is static
+            modelSelector.value = preferredModelSelect.value;
+            
+            setTimeout(() => {
+                closeSettingsModal();
+            }, 1000);
+        }
+
+        // Attach event listeners for settings modal
+        if (settingsButton) {
+            settingsButton.addEventListener('click', openSettingsModal);
+        }
+        if (closeSettingsModalButton) {
+            closeSettingsModalButton.addEventListener('click', closeSettingsModal);
+        }
+        // saveSettings is called by button onclick directly in HTML
 
         // --- Chat History Management --- (functions defined, called by DOMContentLoaded or events)
         function generateChatId() {
@@ -834,7 +859,7 @@
             const payload = {
                 conversation: [...currentConversation], // currentConversation includes the new user message from displayMessage
                 model: selectedModelValue,
-                apiKey: apiKeyToUse
+                apiKey: apiKeyToUse // This will be the specific key for the selected model's provider
             };
             
             messageInput.value = '';
@@ -980,14 +1005,17 @@
         }
 
         function getApiKeyForModel(modelName) {
-            if (modelName.startsWith('gpt-') || modelName.startsWith('o3')) {
+            if (!modelName) return ''; // Should not happen if a model is always selected
+
+            if (modelName.startsWith('gpt-') || modelName.startsWith('o3-')) { // Adjusted for o3 prefix
                 return localStorage.getItem('revitMCP_openai_api_key') || '';
             } else if (modelName.startsWith('claude-')) {
                 return localStorage.getItem('revitMCP_anthropic_api_key') || '';
-            } else if (modelName.startswith('gemini-')) {
+            } else if (modelName.startsWith('gemini-')) {
                 return localStorage.getItem('revitMCP_google_api_key') || '';
             }
-            return ''; // For echo_model or other non-API models
+            // For 'echo_model' or any other model not matching known prefixes, no API key is needed by the backend.
+            return ''; 
         }
 
     </script>
