@@ -39,13 +39,13 @@ if os.path.exists(STARTUP_LOG_FILE):
         os.remove(STARTUP_LOG_FILE)
     except Exception:
         pass
-startup_file_handler = logging.FileHandler(STARTUP_LOG_FILE)
+startup_file_handler = logging.FileHandler(STARTUP_LOG_FILE, encoding='utf-8')
 startup_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 startup_logger.addHandler(startup_file_handler)
 startup_logger.info("--- Server script attempting to start ---")
 
 def configure_flask_logger(app_instance, debug_mode):
-    file_handler = logging.FileHandler(APP_LOG_FILE, mode='a')
+    file_handler = logging.FileHandler(APP_LOG_FILE, mode='a', encoding='utf-8')
     file_handler.setLevel(logging.DEBUG if debug_mode else logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
@@ -82,6 +82,36 @@ try:
     mcp_server = FastMCP("RevitMCPServer")
     app.logger.info("FastMCP server instance created: %s", mcp_server.name)
 
+    # --- Session Storage for Element IDs ---
+    # This stores element IDs from searches so they can be accurately referenced later
+    element_storage = {}  # Format: {"category_name": {"element_ids": [...], "count": N, "timestamp": "..."}}
+    
+    def store_elements(category_name: str, element_ids: list, count: int) -> str:
+        """Store element IDs for a category and return a storage key."""
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        storage_key = category_name.lower().replace(" ", "_")
+        element_storage[storage_key] = {
+            "element_ids": element_ids,
+            "count": count,
+            "category": category_name,
+            "timestamp": timestamp
+        }
+        app.logger.info(f"Stored {count} element IDs for category '{category_name}' with key '{storage_key}'")
+        return storage_key
+    
+    def get_stored_elements(storage_key: str) -> dict:
+        """Retrieve stored element IDs by storage key."""
+        storage_key = storage_key.lower().replace(" ", "_")
+        if storage_key in element_storage:
+            return element_storage[storage_key]
+        return None
+    
+    def list_stored_categories() -> dict:
+        """List all currently stored categories."""
+        return {key: {"category": data["category"], "count": data["count"], "timestamp": data["timestamp"]} 
+                for key, data in element_storage.items()}
+
     # --- Revit MCP API Communication ---
     # Auto-detect which port the Revit MCP API is running on
     REVIT_MCP_API_BASE_URL = None
@@ -115,9 +145,16 @@ try:
 
     # --- Tool Name Constants (used for REVIT_TOOLS_SPEC and dispatch) ---
     REVIT_INFO_TOOL_NAME = "get_revit_project_info"
-    GET_REVIT_VIEW_TOOL_NAME = "get_revit_view" # Corresponds to "export_revit_view" listener command
+    GET_ELEMENTS_BY_CATEGORY_TOOL_NAME = "get_elements_by_category"
     SELECT_ELEMENTS_TOOL_NAME = "select_elements_by_id"
-    SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME = "select_elements_by_category"
+    SELECT_STORED_ELEMENTS_TOOL_NAME = "select_stored_elements"
+    LIST_STORED_ELEMENTS_TOOL_NAME = "list_stored_elements"
+    FILTER_ELEMENTS_TOOL_NAME = "filter_elements"
+    GET_ELEMENT_PROPERTIES_TOOL_NAME = "get_element_properties"
+    UPDATE_ELEMENT_PARAMETERS_TOOL_NAME = "update_element_parameters"
+
+    # Replace batch workflow with generic planner
+    PLANNER_TOOL_NAME = "plan_and_execute_workflow"
 
     # --- Helper function to call Revit Listener (remains mostly the same) ---
     # This function is now central for all Revit interactions triggered by MCP tools.
@@ -213,11 +250,19 @@ try:
         app.logger.info(f"MCP Tool executed: {REVIT_INFO_TOOL_NAME}")
         return call_revit_listener(command_path='/project_info', method='GET')
 
-    @mcp_server.tool(name=GET_REVIT_VIEW_TOOL_NAME)
-    def get_revit_view_mcp_tool(view_name: str) -> dict:
-        """Retrieves and displays a specific view from the current Revit project as an image."""
-        app.logger.info(f"MCP Tool executed: {GET_REVIT_VIEW_TOOL_NAME} with view_name: {view_name}")
-        return call_revit_listener(command_path='/export_revit_view', method='POST', payload_data={"view_name": view_name})
+    @mcp_server.tool(name=GET_ELEMENTS_BY_CATEGORY_TOOL_NAME)
+    def get_elements_by_category_mcp_tool(category_name: str) -> dict:
+        """Retrieves all elements in the Revit model belonging to the specified category, returning their IDs and names. Automatically stores the results for later selection."""
+        app.logger.info(f"MCP Tool executed: {GET_ELEMENTS_BY_CATEGORY_TOOL_NAME} with category_name: {category_name}")
+        result = call_revit_listener(command_path='/get_elements_by_category', method='POST', payload_data={"category_name": category_name})
+        
+        # Automatically store the results if successful
+        if result.get("status") == "success" and "element_ids" in result:
+            storage_key = store_elements(category_name, result["element_ids"], result.get("count", len(result["element_ids"])))
+            result["stored_as"] = storage_key
+            result["storage_message"] = f"Results stored as '{storage_key}' - use select_stored_elements to select these elements"
+        
+        return result
 
     @mcp_server.tool(name=SELECT_ELEMENTS_TOOL_NAME)
     def select_elements_by_id_mcp_tool(element_ids: list[str]) -> dict:
@@ -242,12 +287,291 @@ try:
             return {"status": "error", "message": f"Invalid input type for element_ids. Expected string or list of strings. Received: {type(element_ids)}"}
 
         return call_revit_listener(command_path='/select_elements_by_id', method='POST', payload_data={"element_ids": processed_element_ids})
-    
-    @mcp_server.tool(name=SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME)
-    def select_elements_by_category_mcp_tool(category_name: str) -> dict:
-        """Selects all elements in the Revit model belonging to the specified category."""
-        app.logger.info(f"MCP Tool executed: {SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME} with category_name: {category_name}")
-        return call_revit_listener(command_path='/select_elements_by_category', method='POST', payload_data={"category_name": category_name})
+
+    @mcp_server.tool(name=SELECT_STORED_ELEMENTS_TOOL_NAME)
+    def select_stored_elements_mcp_tool(category_name: str) -> dict:
+        """Selects elements that were previously retrieved and stored by get_elements_by_category or filter_elements. Use the category name (e.g., 'windows', 'doors') to select the stored elements."""
+        app.logger.info(f"MCP Tool executed: {SELECT_STORED_ELEMENTS_TOOL_NAME} with category_name: {category_name}")
+        
+        # Normalize the input category name
+        normalized_category = category_name.lower().replace("ost_", "").replace(" ", "_")
+        
+        # Strategy 1: Try exact match first
+        stored_data = get_stored_elements(normalized_category)
+        
+        # Strategy 2: If exact match fails, try to find partial matches
+        if not stored_data:
+            available_keys = list(element_storage.keys())
+            
+            # Look for keys that start with the category name (e.g., "windows" matching "windows_level_l5")
+            potential_matches = [key for key in available_keys if key.startswith(normalized_category)]
+            
+            if potential_matches:
+                # If multiple matches, prefer the most recent one (they're stored in order)
+                best_match = potential_matches[-1]  # Take the last (most recent) match
+                stored_data = get_stored_elements(best_match)
+                app.logger.info(f"Found partial match: '{best_match}' for category '{category_name}'")
+            else:
+                # Strategy 3: Try fuzzy matching - look for the category name anywhere in the key
+                fuzzy_matches = [key for key in available_keys if normalized_category in key]
+                if fuzzy_matches:
+                    best_match = fuzzy_matches[-1]  # Take the most recent
+                    stored_data = get_stored_elements(best_match)
+                    app.logger.info(f"Found fuzzy match: '{best_match}' for category '{category_name}'")
+        
+        if not stored_data:
+            available_keys = list(element_storage.keys())
+            return {
+                "status": "error", 
+                "message": f"No stored elements found for category '{category_name}'. Available stored categories: {available_keys}",
+                "available_categories": available_keys,
+                "suggestion": "Try using list_stored_elements to see all available categories, or use the exact storage key name."
+            }
+        
+        # Use the stored element IDs
+        element_ids = stored_data["element_ids"]
+        app.logger.info(f"Using {len(element_ids)} stored element IDs for category '{category_name}' (matched to stored key)")
+        
+        # Use the focused selection approach - just select and keep selected
+        result = call_revit_listener(command_path='/select_elements_focused', method='POST', payload_data={"element_ids": element_ids})
+        
+        # Add storage info to the result
+        if result.get("status") == "success":
+            result["source"] = f"stored_{category_name}"
+            result["stored_count"] = stored_data["count"]
+            result["stored_at"] = stored_data["timestamp"]
+            result["matched_key"] = stored_data.get("category", "unknown")
+            result["approach_note"] = "Focused selection - elements should remain active for user operations"
+        
+        return result
+
+    @mcp_server.tool(name=LIST_STORED_ELEMENTS_TOOL_NAME)
+    def list_stored_elements_mcp_tool() -> dict:
+        """Lists all currently stored element categories and their counts. Use this to see what elements are available for selection."""
+        app.logger.info(f"MCP Tool executed: {LIST_STORED_ELEMENTS_TOOL_NAME}")
+        
+        stored_categories = list_stored_categories()
+        
+        return {
+            "status": "success",
+            "message": f"Found {len(stored_categories)} stored categories",
+            "stored_categories": stored_categories,
+            "total_categories": len(stored_categories)
+        }
+
+    @mcp_server.tool(name=FILTER_ELEMENTS_TOOL_NAME)
+    def filter_elements_mcp_tool(category_name: str, level_name: str = None, parameters: list = None) -> dict:
+        """Filters elements by category, level, and parameter conditions. Returns element IDs matching the criteria. Use this instead of get_elements_by_category when you need specific filtering."""
+        app.logger.info(f"MCP Tool executed: {FILTER_ELEMENTS_TOOL_NAME} with category: {category_name}, level: {level_name}, parameters: {parameters}")
+        
+        payload = {"category_name": category_name}
+        if level_name:
+            payload["level_name"] = level_name
+        if parameters:
+            payload["parameters"] = parameters
+        
+        result = call_revit_listener(command_path='/elements/filter', method='POST', payload_data=payload)
+        
+        # Automatically store the results if successful
+        if result.get("status") == "success" and "element_ids" in result:
+            # Create a descriptive storage key
+            storage_key = category_name.lower().replace("ost_", "").replace(" ", "_")
+            if level_name:
+                storage_key += f"_level_{level_name.lower()}"
+            if parameters:
+                storage_key += "_filtered"
+            
+            stored_key = store_elements(storage_key, result["element_ids"], result.get("count", len(result["element_ids"])))
+            result["stored_as"] = stored_key
+            result["storage_message"] = f"Filtered results stored as '{stored_key}' - use select_stored_elements to select these elements"
+        
+        return result
+
+    @mcp_server.tool(name=GET_ELEMENT_PROPERTIES_TOOL_NAME)
+    def get_element_properties_mcp_tool(element_ids: list[str], parameter_names: list[str] = None) -> dict:
+        """Gets parameter values for specified elements. If parameter_names not provided, returns common parameters for the element category."""
+        app.logger.info(f"MCP Tool executed: {GET_ELEMENT_PROPERTIES_TOOL_NAME} with {len(element_ids)} elements")
+        
+        payload = {"element_ids": element_ids}
+        if parameter_names:
+            payload["parameter_names"] = parameter_names
+        
+        return call_revit_listener(command_path='/elements/get_properties', method='POST', payload_data=payload)
+
+    @mcp_server.tool(name=UPDATE_ELEMENT_PARAMETERS_TOOL_NAME)
+    def update_element_parameters_mcp_tool(updates: list[dict]) -> dict:
+        """Updates parameter values for elements. Each update should contain element_id and parameters dict with parameter names and new values."""
+        app.logger.info(f"MCP Tool executed: {UPDATE_ELEMENT_PARAMETERS_TOOL_NAME} with {len(updates)} updates")
+        
+        return call_revit_listener(command_path='/elements/update_parameters', method='POST', payload_data={"updates": updates})
+
+    @mcp_server.tool(name=PLANNER_TOOL_NAME)
+    def plan_and_execute_workflow_tool(user_request: str, execution_plan: list[dict]) -> dict:
+        """
+        Generic planner that executes a sequence of tools based on a planned workflow.
+        The LLM should first analyze the user request, then provide a step-by-step execution plan.
+        
+        Args:
+            user_request: The original user request
+            execution_plan: List of planned steps, each containing:
+                - tool: Tool name to execute
+                - params: Parameters for the tool
+                - description: What this step accomplishes
+        """
+        app.logger.info(f"MCP Tool executed: {PLANNER_TOOL_NAME} - Executing {len(execution_plan)} planned steps")
+        
+        workflow_results = {
+            "user_request": user_request,
+            "planned_steps": len(execution_plan),
+            "executed_steps": [],
+            "step_results": [],
+            "final_status": "success",
+            "summary": ""
+        }
+        
+        # Available tool mapping
+        available_tools = {
+            "get_revit_project_info": get_revit_project_info_mcp_tool,
+            "get_elements_by_category": lambda **kwargs: get_elements_by_category_mcp_tool(kwargs.get("category_name")),
+            "filter_elements": lambda **kwargs: filter_elements_mcp_tool(
+                kwargs.get("category_name"), 
+                kwargs.get("level_name"), 
+                kwargs.get("parameters", [])
+            ),
+            "get_element_properties": lambda **kwargs: get_element_properties_mcp_tool(
+                kwargs.get("element_ids", []), 
+                kwargs.get("parameter_names", [])
+            ),
+            "update_element_parameters": lambda **kwargs: update_element_parameters_mcp_tool(
+                kwargs.get("updates", [])
+            ),
+            "select_elements_by_id": lambda **kwargs: select_elements_by_id_mcp_tool(
+                kwargs.get("element_ids", [])
+            ),
+            "select_stored_elements": lambda **kwargs: select_stored_elements_mcp_tool(
+                kwargs.get("category_name")
+            ),
+            "list_stored_elements": list_stored_elements_mcp_tool
+        }
+        
+        try:
+            for i, step in enumerate(execution_plan, 1):
+                step_info = {
+                    "step_number": i,
+                    "tool": step.get("tool"),
+                    "description": step.get("description", ""),
+                    "status": "pending"
+                }
+                
+                tool_name = step.get("tool")
+                tool_params = step.get("params", {}).copy()  # Make a copy to avoid modifying the original
+                
+                # Substitute placeholders in parameters with values from previous steps
+                def substitute_placeholders(obj):
+                    """Recursively substitute placeholder values in the object."""
+                    if isinstance(obj, str):
+                        # Look for ${step_X_key} patterns and replace them
+                        import re
+                        pattern = r'\$\{step_(\d+)_([^}]+)\}'
+                        
+                        def replace_placeholder(match):
+                            step_num = int(match.group(1))
+                            key = match.group(2)
+                            placeholder_key = f"step_{step_num}_{key}"
+                            if placeholder_key in workflow_results:
+                                value = workflow_results[placeholder_key]
+                                # If the entire string is just the placeholder, return the actual value (preserving type)
+                                if obj.strip() == match.group(0):
+                                    return value
+                                # Otherwise, convert to string for partial replacement
+                                return str(value)
+                            else:
+                                app.logger.warning(f"Placeholder {placeholder_key} not found in workflow results")
+                                return match.group(0)  # Return original if not found
+                        
+                        # Check if the entire string is just a placeholder
+                        full_match = re.fullmatch(pattern, obj.strip())
+                        if full_match:
+                            step_num = int(full_match.group(1))
+                            key = full_match.group(2)
+                            placeholder_key = f"step_{step_num}_{key}"
+                            if placeholder_key in workflow_results:
+                                return workflow_results[placeholder_key]  # Return the actual value (preserving type)
+                        
+                        # Otherwise do normal substitution
+                        return re.sub(pattern, replace_placeholder, obj)
+                    elif isinstance(obj, dict):
+                        return {k: substitute_placeholders(v) for k, v in obj.items()}
+                    elif isinstance(obj, list):
+                        return [substitute_placeholders(item) for item in obj]
+                    else:
+                        return obj
+                
+                # Apply substitution to all parameters
+                tool_params = substitute_placeholders(tool_params)
+                
+                app.logger.info(f"Executing step {i}: {tool_name} - {step.get('description', '')}")
+                app.logger.debug(f"Step {i} parameters after substitution: {tool_params}")
+                
+                if tool_name not in available_tools:
+                    step_info["status"] = "error"
+                    step_info["error"] = f"Unknown tool: {tool_name}"
+                    step_info["result"] = {"error": f"Tool '{tool_name}' not available"}
+                else:
+                    try:
+                        # Execute the tool
+                        tool_function = available_tools[tool_name]
+                        if tool_name == "get_revit_project_info" or tool_name == "list_stored_elements":
+                            # Tools that take no parameters
+                            result = tool_function()
+                        else:
+                            # Tools that take parameters
+                            result = tool_function(**tool_params)
+                        
+                        step_info["status"] = "completed"
+                        step_info["result"] = result
+                        
+                        # Store results for potential use in subsequent steps
+                        # This allows chaining where one step's output feeds into the next
+                        if "element_ids" in result:
+                            workflow_results[f"step_{i}_element_ids"] = result["element_ids"]
+                        if "count" in result:
+                            workflow_results[f"step_{i}_count"] = result["count"]
+                        if "elements" in result:
+                            workflow_results[f"step_{i}_elements"] = result["elements"]
+                        
+                    except Exception as tool_error:
+                        step_info["status"] = "error" 
+                        step_info["error"] = str(tool_error)
+                        step_info["result"] = {"error": str(tool_error)}
+                        app.logger.error(f"Step {i} failed: {tool_error}")
+                
+                workflow_results["executed_steps"].append(step_info)
+                workflow_results["step_results"].append(step_info["result"])
+            
+            # Generate summary
+            successful_steps = len([s for s in workflow_results["executed_steps"] if s["status"] == "completed"])
+            failed_steps = len([s for s in workflow_results["executed_steps"] if s["status"] == "error"])
+            
+            if failed_steps == 0:
+                workflow_results["final_status"] = "success"
+                workflow_results["summary"] = f"Successfully completed all {successful_steps} planned steps"
+            elif successful_steps > 0:
+                workflow_results["final_status"] = "partial"
+                workflow_results["summary"] = f"Completed {successful_steps} steps, {failed_steps} steps failed"
+            else:
+                workflow_results["final_status"] = "failed"
+                workflow_results["summary"] = f"All {failed_steps} steps failed"
+            
+            app.logger.info(f"Workflow completed: {workflow_results['summary']}")
+            return workflow_results
+            
+        except Exception as e:
+            workflow_results["final_status"] = "error"
+            workflow_results["error"] = str(e)
+            workflow_results["summary"] = f"Workflow execution failed: {str(e)}"
+            app.logger.error(f"Workflow execution error: {e}")
+            return workflow_results
 
     app.logger.info("MCP tools defined and decorated.")
 
@@ -255,39 +579,131 @@ try:
     # These definitions tell the LLMs (OpenAI, Anthropic, Google) about the tools.
     # The 'name' in these specs MUST match the 'name' in @mcp_server.tool() and the constants.
     REVIT_INFO_TOOL_DESCRIPTION_FOR_LLM = "Retrieves detailed information about the currently open Revit project, such as project name, file path, Revit version, Revit build number, and active document title."
-    GET_REVIT_VIEW_TOOL_DESCRIPTION_FOR_LLM = "Retrieves and displays a specific view from the current Revit project as an image. Use this if the user asks to see, show, or get a particular Revit view by its name."
-    GET_REVIT_VIEW_TOOL_PARAMETERS_FOR_LLM = {
-        "type": "object", "properties": {"view_name": {"type": "string", "description": "The exact name of the Revit view to retrieve and display."}}, "required": ["view_name"]
+    GET_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM = "Retrieves and stores all elements in the current Revit model for the specified category. Use this ONLY when the user wants to find/get elements. This automatically stores results for later selection. After calling this, if the user wants to select the elements, use select_stored_elements."
+    GET_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object", "properties": {"category_name": {"type": "string", "description": "The name of the Revit category to retrieve elements from (e.g., 'OST_Windows', 'OST_Doors', 'OST_Walls' or simplified like 'Windows', 'Doors', 'Walls')."}}, "required": ["category_name"]
     }
-    SELECT_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM = "Selects one or more elements in the current Revit model using their Element IDs. Use this if the user explicitly asks to select elements and provides their IDs, or if a previous tool has returned a list of IDs to be selected."
+    SELECT_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM = "DEPRECATED - Use select_stored_elements instead. Selects elements by exact IDs. Only use this if you have specific element IDs that are NOT from get_elements_by_category."
     SELECT_ELEMENTS_TOOL_PARAMETERS_FOR_LLM = {
         "type": "object", "properties": {"element_ids": {"type": "array", "items": {"type": "string"}, "description": "An array of Element IDs (as strings) of the Revit elements to be selected."}}, "required": ["element_ids"]
     }
-
-    SELECT_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM = "Selects all elements in the current Revit model that belong to the specified category name (e.g., 'Windows', 'Doors', 'Walls')."
-    SELECT_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM = {
-        "type": "object", "properties": {"category_name": {"type": "string", "description": "The name of the Revit category to select elements from (e.g., 'Walls', 'Doors', 'Windows')."}}, "required": ["category_name"]
+    SELECT_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM = "Selects elements that were previously retrieved by get_elements_by_category. Use this when the user wants to SELECT elements after using get_elements_by_category. When user says 'select windows', 'select doors', 'select them', etc., use this tool with the category name. Automatically zooms to show selected elements without changing the user's view."
+    SELECT_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object", "properties": {"category_name": {"type": "string", "description": "The category name of the stored elements to select (e.g., 'windows', 'doors', 'walls'). Use the same category name that was used with get_elements_by_category."}}, "required": ["category_name"]
+    }
+    LIST_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM = "Lists all currently stored element categories and their counts. Use this to see what elements are available for selection using select_stored_elements."
+    LIST_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object", "properties": {}
+    }
+    FILTER_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM = "Filters elements by category, level, and parameter conditions. Use this when you need to find specific elements with certain criteria (e.g., windows on Level 5 with specific sill height). More powerful than get_elements_by_category for specific searches. IMPORTANT: When filtering for parameter updates, always follow with get_element_properties to verify current values, then update_element_parameters to make changes. Chain these tools together in one conversation turn."
+    FILTER_ELEMENTS_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object", 
+        "properties": {
+            "category_name": {"type": "string", "description": "The Revit category (e.g., 'OST_Windows', 'Windows')"},
+            "level_name": {"type": "string", "description": "Optional level name to filter by (e.g., 'Level 1', 'L5')"},
+            "parameters": {
+                "type": "array", 
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Parameter name (e.g., 'Sill Height', 'Width')"},
+                        "value": {"type": "string", "description": "Parameter value to match (e.g., '2\\' 3\\\"', '900')"},
+                        "condition": {"type": "string", "enum": ["equals", "contains", "greater_than", "less_than"], "description": "Comparison condition"}
+                    },
+                    "required": ["name", "value"]
+                },
+                "description": "Optional parameter filters"
+            }
+        }, 
+        "required": ["category_name"]
+    }
+    GET_ELEMENT_PROPERTIES_TOOL_DESCRIPTION_FOR_LLM = "Gets parameter values for specified elements. Use this to read current values before updating or to display element properties to the user. IMPORTANT: This is typically used as a middle step - after filtering elements and before updating them. When user requests updates, chain: filter -> get_properties -> update_parameters in one turn."
+    GET_ELEMENT_PROPERTIES_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object",
+        "properties": {
+            "element_ids": {"type": "array", "items": {"type": "string"}, "description": "Array of element IDs to get properties for"},
+            "parameter_names": {"type": "array", "items": {"type": "string"}, "description": "Optional array of specific parameter names to retrieve (e.g., ['Sill Height', 'Width']). If not provided, gets common parameters."}
+        },
+        "required": ["element_ids"]
+    }
+    UPDATE_ELEMENT_PARAMETERS_TOOL_DESCRIPTION_FOR_LLM = "Updates parameter values for elements. Use this to modify element properties like sill height, dimensions, comments, etc. Always use this within a transaction context. IMPORTANT: This is typically the final step in an update workflow. When user requests parameter updates, chain: filter_elements -> get_element_properties -> update_element_parameters -> select_stored_elements in one conversation turn."
+    UPDATE_ELEMENT_PARAMETERS_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object",
+        "properties": {
+            "updates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "element_id": {"type": "string", "description": "Element ID to update"},
+                        "parameters": {
+                            "type": "object",
+                            "description": "Object with parameter names as keys and new values as values (e.g., {'Sill Height': '2\\' 6\\\"', 'Comments': 'Updated'})"
+                        }
+                    },
+                    "required": ["element_id", "parameters"]
+                },
+                "description": "Array of element updates"
+            }
+        },
+        "required": ["updates"]
+    }
+    PLANNER_TOOL_DESCRIPTION_FOR_LLM = "Executes a sequence of tools based on a planned workflow. The LLM should first analyze the user request, then provide a step-by-step execution plan."
+    PLANNER_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object",
+        "properties": {
+            "user_request": {"type": "string", "description": "The original user request"},
+            "execution_plan": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string", "description": "The tool to execute"},
+                        "params": {"type": "object", "description": "Parameters for the tool"},
+                        "description": {"type": "string", "description": "What this step accomplishes"}
+                    },
+                    "required": ["tool", "params"]
+                },
+                "description": "List of planned steps"
+            }
+        },
+        "required": ["user_request", "execution_plan"]
     }
 
     REVIT_TOOLS_SPEC_FOR_LLMS = {
         "openai": [
             {"type": "function", "function": {"name": REVIT_INFO_TOOL_NAME, "description": REVIT_INFO_TOOL_DESCRIPTION_FOR_LLM, "parameters": {"type": "object", "properties": {}}}},
-            {"type": "function", "function": {"name": GET_REVIT_VIEW_TOOL_NAME, "description": GET_REVIT_VIEW_TOOL_DESCRIPTION_FOR_LLM, "parameters": GET_REVIT_VIEW_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": GET_ELEMENTS_BY_CATEGORY_TOOL_NAME, "description": GET_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM, "parameters": GET_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM}},
             {"type": "function", "function": {"name": SELECT_ELEMENTS_TOOL_NAME, "description": SELECT_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "parameters": SELECT_ELEMENTS_TOOL_PARAMETERS_FOR_LLM}},
-            {"type": "function", "function": {"name": SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME, "description": SELECT_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM, "parameters": SELECT_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": SELECT_STORED_ELEMENTS_TOOL_NAME, "description": SELECT_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "parameters": SELECT_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": LIST_STORED_ELEMENTS_TOOL_NAME, "description": LIST_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "parameters": LIST_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": FILTER_ELEMENTS_TOOL_NAME, "description": FILTER_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "parameters": FILTER_ELEMENTS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": GET_ELEMENT_PROPERTIES_TOOL_NAME, "description": GET_ELEMENT_PROPERTIES_TOOL_DESCRIPTION_FOR_LLM, "parameters": GET_ELEMENT_PROPERTIES_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": UPDATE_ELEMENT_PARAMETERS_TOOL_NAME, "description": UPDATE_ELEMENT_PARAMETERS_TOOL_DESCRIPTION_FOR_LLM, "parameters": UPDATE_ELEMENT_PARAMETERS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": PLANNER_TOOL_NAME, "description": PLANNER_TOOL_DESCRIPTION_FOR_LLM, "parameters": PLANNER_TOOL_PARAMETERS_FOR_LLM}},
         ],
         "anthropic": [
             {"name": REVIT_INFO_TOOL_NAME, "description": REVIT_INFO_TOOL_DESCRIPTION_FOR_LLM, "input_schema": {"type": "object", "properties": {}}},
-            {"name": GET_REVIT_VIEW_TOOL_NAME, "description": GET_REVIT_VIEW_TOOL_DESCRIPTION_FOR_LLM, "input_schema": GET_REVIT_VIEW_TOOL_PARAMETERS_FOR_LLM},
+            {"name": GET_ELEMENTS_BY_CATEGORY_TOOL_NAME, "description": GET_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM, "input_schema": GET_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM},
             {"name": SELECT_ELEMENTS_TOOL_NAME, "description": SELECT_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "input_schema": SELECT_ELEMENTS_TOOL_PARAMETERS_FOR_LLM},
-            {"name": SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME, "description": SELECT_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM, "input_schema": SELECT_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM},
+            {"name": SELECT_STORED_ELEMENTS_TOOL_NAME, "description": SELECT_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "input_schema": SELECT_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM},
+            {"name": LIST_STORED_ELEMENTS_TOOL_NAME, "description": LIST_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "input_schema": LIST_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM},
+            {"name": FILTER_ELEMENTS_TOOL_NAME, "description": FILTER_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "input_schema": FILTER_ELEMENTS_TOOL_PARAMETERS_FOR_LLM},
+            {"name": GET_ELEMENT_PROPERTIES_TOOL_NAME, "description": GET_ELEMENT_PROPERTIES_TOOL_DESCRIPTION_FOR_LLM, "input_schema": GET_ELEMENT_PROPERTIES_TOOL_PARAMETERS_FOR_LLM},
+            {"name": UPDATE_ELEMENT_PARAMETERS_TOOL_NAME, "description": UPDATE_ELEMENT_PARAMETERS_TOOL_DESCRIPTION_FOR_LLM, "input_schema": UPDATE_ELEMENT_PARAMETERS_TOOL_PARAMETERS_FOR_LLM},
+            {"name": PLANNER_TOOL_NAME, "description": PLANNER_TOOL_DESCRIPTION_FOR_LLM, "input_schema": PLANNER_TOOL_PARAMETERS_FOR_LLM},
         ],
         "google": [
             google_types.Tool(function_declarations=[
                 google_types.FunctionDeclaration(name=REVIT_INFO_TOOL_NAME, description=REVIT_INFO_TOOL_DESCRIPTION_FOR_LLM, parameters={"type": "object", "properties": {}}),
-                google_types.FunctionDeclaration(name=GET_REVIT_VIEW_TOOL_NAME, description=GET_REVIT_VIEW_TOOL_DESCRIPTION_FOR_LLM, parameters=GET_REVIT_VIEW_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=GET_ELEMENTS_BY_CATEGORY_TOOL_NAME, description=GET_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM, parameters=GET_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM),
                 google_types.FunctionDeclaration(name=SELECT_ELEMENTS_TOOL_NAME, description=SELECT_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, parameters=SELECT_ELEMENTS_TOOL_PARAMETERS_FOR_LLM),
-                google_types.FunctionDeclaration(name=SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME, description=SELECT_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM, parameters=SELECT_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=SELECT_STORED_ELEMENTS_TOOL_NAME, description=SELECT_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, parameters=SELECT_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=LIST_STORED_ELEMENTS_TOOL_NAME, description=LIST_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, parameters=LIST_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=FILTER_ELEMENTS_TOOL_NAME, description=FILTER_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, parameters=FILTER_ELEMENTS_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=GET_ELEMENT_PROPERTIES_TOOL_NAME, description=GET_ELEMENT_PROPERTIES_TOOL_DESCRIPTION_FOR_LLM, parameters=GET_ELEMENT_PROPERTIES_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=UPDATE_ELEMENT_PARAMETERS_TOOL_NAME, description=UPDATE_ELEMENT_PARAMETERS_TOOL_DESCRIPTION_FOR_LLM, parameters=UPDATE_ELEMENT_PARAMETERS_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=PLANNER_TOOL_NAME, description=PLANNER_TOOL_DESCRIPTION_FOR_LLM, parameters=PLANNER_TOOL_PARAMETERS_FOR_LLM),
             ])
         ]
     }
@@ -319,6 +735,50 @@ try:
         selected_model_ui_name = data.get('model')
         # user_message_content = conversation_history[-1]['content'].strip() # Not directly used anymore for dispatch
         
+        # Add planning guidance system prompt
+        planning_system_prompt = {
+            "role": "system", 
+            "content": """You are a Revit automation assistant with planning capabilities.
+
+PLANNING APPROACH:
+For complex requests, use the plan_and_execute_workflow tool which allows you to:
+1. Analyze the user request 
+2. Plan a sequence of steps using available tools
+3. Execute all steps in one operation
+4. Return complete results
+
+AVAILABLE TOOLS FOR PLANNING:
+- get_revit_project_info: Get project information (no params)
+- get_elements_by_category: Get all elements by category (params: category_name)
+- filter_elements: Advanced filtering (params: category_name, level_name, parameters)
+- get_element_properties: Get parameter values (params: element_ids, parameter_names)
+- update_element_parameters: Update parameters (params: updates)
+- select_elements_by_id: Select specific elements (params: element_ids)
+- select_stored_elements: Select stored elements (params: category_name)
+- list_stored_elements: List available stored categories (no params)
+
+EXECUTION PLAN FORMAT:
+[
+  {
+    "tool": "filter_elements",
+    "params": {"category_name": "Windows", "level_name": "L5", "parameters": [{"name": "Sill Height", "value": "2' 3\"", "condition": "equals"}]},
+    "description": "Find windows on L5 with sill height 2'3\""
+  },
+  {
+    "tool": "update_element_parameters", 
+    "params": {"updates": [{"element_id": "${step_1_element_ids}", "parameters": {"Sill Height": "2' 6\""}}]},
+    "description": "Update sill height to 2'6\""
+  }
+]
+
+WORKFLOW EXAMPLES:
+- Parameter updates: filter_elements → update_element_parameters → select_stored_elements
+- Property inspection: filter_elements → get_element_properties
+- Element discovery: get_elements_by_category → get_element_properties → select_stored_elements
+
+Use plan_and_execute_workflow for multi-step operations to provide complete results in one response."""
+        }
+        
         final_response_to_frontend = {}
         image_output_for_frontend = None # To store image data if a tool returns it
         model_reply_text = "" # The final text reply from the LLM
@@ -331,7 +791,8 @@ try:
             # --- OpenAI Models ---
             elif selected_model_ui_name.startswith('gpt-') or selected_model_ui_name.startswith('o3'):
                 client = openai.OpenAI(api_key=api_key)
-                messages_for_llm = [{"role": "assistant" if msg['role'] == 'bot' else msg['role'], "content": msg['content']} for msg in conversation_history]
+                # Add system prompt for planning
+                messages_for_llm = [planning_system_prompt] + [{"role": "assistant" if msg['role'] == 'bot' else msg['role'], "content": msg['content']} for msg in conversation_history]
                 
                 app.logger.debug(f"OpenAI: Sending messages: {messages_for_llm}")
                 completion = client.chat.completions.create(model=selected_model_ui_name, messages=messages_for_llm, tools=REVIT_TOOLS_SPEC_FOR_LLMS['openai'], tool_choice="auto")
@@ -352,19 +813,30 @@ try:
                             tool_result_data = {}
                             if function_name == REVIT_INFO_TOOL_NAME:
                                 tool_result_data = get_revit_project_info_mcp_tool()
-                            elif function_name == GET_REVIT_VIEW_TOOL_NAME:
-                                tool_result_data = get_revit_view_mcp_tool(view_name=function_args.get("view_name"))
+                            elif function_name == GET_ELEMENTS_BY_CATEGORY_TOOL_NAME:
+                                tool_result_data = get_elements_by_category_mcp_tool(category_name=function_args.get("category_name"))
                             elif function_name == SELECT_ELEMENTS_TOOL_NAME:
                                 tool_result_data = select_elements_by_id_mcp_tool(element_ids=function_args.get("element_ids", []))
-                            elif function_name == SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME:
-                                tool_result_data = select_elements_by_category_mcp_tool(category_name=function_args.get("category_name"))
+                            elif function_name == SELECT_STORED_ELEMENTS_TOOL_NAME:
+                                tool_result_data = select_stored_elements_mcp_tool(category_name=function_args.get("category_name"))
+                            elif function_name == LIST_STORED_ELEMENTS_TOOL_NAME:
+                                tool_result_data = list_stored_elements_mcp_tool()
+                            elif function_name == FILTER_ELEMENTS_TOOL_NAME:
+                                tool_result_data = filter_elements_mcp_tool(category_name=function_args.get("category_name"), level_name=function_args.get("level_name"), parameters=function_args.get("parameters", []))
+                            elif function_name == GET_ELEMENT_PROPERTIES_TOOL_NAME:
+                                tool_result_data = get_element_properties_mcp_tool(element_ids=function_args.get("element_ids", []), parameter_names=function_args.get("parameter_names", []))
+                            elif function_name == UPDATE_ELEMENT_PARAMETERS_TOOL_NAME:
+                                tool_result_data = update_element_parameters_mcp_tool(updates=function_args.get("updates", []))
+                            elif function_name == PLANNER_TOOL_NAME:
+                                tool_result_data = plan_and_execute_workflow_tool(
+                                    user_request=function_args.get("user_request"),
+                                    execution_plan=function_args.get("execution_plan", [])
+                                )
                             else:
                                 app.logger.warning(f"OpenAI: Unknown tool {function_name} called.")
                                 tool_result_data = {"status": "error", "message": f"Unknown tool '{function_name}' requested by LLM."}
                             
                             tool_response_content = json.dumps(tool_result_data)
-                            if function_name == GET_REVIT_VIEW_TOOL_NAME and tool_result_data.get("status") == "success" and "image_data" in tool_result_data.get("data", {}):
-                                image_output_for_frontend = tool_result_data["data"]
                         
                         messages_for_llm.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": tool_response_content})
                     
@@ -378,10 +850,19 @@ try:
             elif selected_model_ui_name.startswith('claude-'):
                 client = anthropic.Anthropic(api_key=api_key)
                 actual_anthropic_model_id = ANTHROPIC_MODEL_ID_MAP.get(selected_model_ui_name, selected_model_ui_name)
+                # Extract system prompt for separate parameter, don't include in messages  
+                system_prompt_content = planning_system_prompt["content"]
                 messages_for_llm = [{"role": "assistant" if msg['role'] == 'bot' else msg['role'], "content": msg['content']} for msg in conversation_history]
 
                 app.logger.debug(f"Anthropic: Sending messages: {messages_for_llm}")
-                response = client.messages.create(model=actual_anthropic_model_id, max_tokens=3000, messages=messages_for_llm, tools=REVIT_TOOLS_SPEC_FOR_LLMS['anthropic'], tool_choice={"type": "auto"})
+                response = client.messages.create(
+                    model=actual_anthropic_model_id, 
+                    max_tokens=3000, 
+                    system=system_prompt_content,
+                    messages=messages_for_llm, 
+                    tools=REVIT_TOOLS_SPEC_FOR_LLMS['anthropic'], 
+                    tool_choice={"type": "auto"}
+                )
                 
                 if response.stop_reason == "tool_use":
                     messages_for_llm.append({"role": "assistant", "content": response.content}) # Add assistant's turn
@@ -397,12 +878,25 @@ try:
                             tool_result_data = {}
                             if tool_name == REVIT_INFO_TOOL_NAME:
                                 tool_result_data = get_revit_project_info_mcp_tool()
-                            elif tool_name == GET_REVIT_VIEW_TOOL_NAME:
-                                tool_result_data = get_revit_view_mcp_tool(view_name=tool_input.get("view_name"))
+                            elif tool_name == GET_ELEMENTS_BY_CATEGORY_TOOL_NAME:
+                                tool_result_data = get_elements_by_category_mcp_tool(category_name=tool_input.get("category_name"))
                             elif tool_name == SELECT_ELEMENTS_TOOL_NAME:
                                 tool_result_data = select_elements_by_id_mcp_tool(element_ids=tool_input.get("element_ids", []))
-                            elif tool_name == SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME:
-                                tool_result_data = select_elements_by_category_mcp_tool(category_name=tool_input.get("category_name"))
+                            elif tool_name == SELECT_STORED_ELEMENTS_TOOL_NAME:
+                                tool_result_data = select_stored_elements_mcp_tool(category_name=tool_input.get("category_name"))
+                            elif tool_name == LIST_STORED_ELEMENTS_TOOL_NAME:
+                                tool_result_data = list_stored_elements_mcp_tool()
+                            elif tool_name == FILTER_ELEMENTS_TOOL_NAME:
+                                tool_result_data = filter_elements_mcp_tool(category_name=tool_input.get("category_name"), level_name=tool_input.get("level_name"), parameters=tool_input.get("parameters", []))
+                            elif tool_name == GET_ELEMENT_PROPERTIES_TOOL_NAME:
+                                tool_result_data = get_element_properties_mcp_tool(element_ids=tool_input.get("element_ids", []), parameter_names=tool_input.get("parameter_names", []))
+                            elif tool_name == UPDATE_ELEMENT_PARAMETERS_TOOL_NAME:
+                                tool_result_data = update_element_parameters_mcp_tool(updates=tool_input.get("updates", []))
+                            elif tool_name == PLANNER_TOOL_NAME:
+                                tool_result_data = plan_and_execute_workflow_tool(
+                                    user_request=tool_input.get("user_request"),
+                                    execution_plan=tool_input.get("execution_plan", [])
+                                )
                             else:
                                 app.logger.warning(f"Anthropic: Unknown tool {tool_name} called.")
                                 tool_result_data = {"status": "error", "message": f"Unknown tool '{tool_name}' requested by LLM."}
@@ -412,13 +906,16 @@ try:
                                 "tool_use_id": tool_use_id, 
                                 "content": json.dumps(tool_result_data) # Anthropic expects content to be string or list of blocks
                             })
-                            if tool_name == GET_REVIT_VIEW_TOOL_NAME and tool_result_data.get("status") == "success" and "image_data" in tool_result_data.get("data", {}):
-                                image_output_for_frontend = tool_result_data["data"]
                     
                     messages_for_llm.append({"role": "user", "content": tool_results_for_anthropic_user_turn})
                     
                     app.logger.debug(f"Anthropic: Resending messages with tool results: {messages_for_llm}")
-                    second_response = client.messages.create(model=actual_anthropic_model_id, max_tokens=3000, messages=messages_for_llm)
+                    second_response = client.messages.create(
+                        model=actual_anthropic_model_id, 
+                        max_tokens=3000, 
+                        system=system_prompt_content,
+                        messages=messages_for_llm
+                    )
                     if second_response.content and second_response.content[0].type == "text":
                         model_reply_text = second_response.content[0].text
                     else: model_reply_text = "Anthropic model responded with non-text content after tool use."
@@ -435,7 +932,7 @@ try:
                         mode=google_types.FunctionCallingConfig.Mode.AUTO
                     )
                 )
-                model = genai.GenerativeModel(selected_model_ui_name, tools=REVIT_TOOLS_SPEC_FOR_LLMS['google'], tool_config=gemini_tool_config)
+                model = genai.GenerativeModel(selected_model_ui_name, tools=REVIT_TOOLS_SPEC_FOR_LLMS['google'], tool_config=gemini_tool_config, system_instruction=planning_system_prompt["content"])
                 
                 gemini_history_for_chat = []
                 for msg in conversation_history:
@@ -461,18 +958,28 @@ try:
                     tool_result_data = {}
                     if function_name == REVIT_INFO_TOOL_NAME:
                         tool_result_data = get_revit_project_info_mcp_tool()
-                    elif function_name == GET_REVIT_VIEW_TOOL_NAME:
-                        tool_result_data = get_revit_view_mcp_tool(view_name=function_args.get("view_name"))
+                    elif function_name == GET_ELEMENTS_BY_CATEGORY_TOOL_NAME:
+                        tool_result_data = get_elements_by_category_mcp_tool(category_name=function_args.get("category_name"))
                     elif function_name == SELECT_ELEMENTS_TOOL_NAME:
                         tool_result_data = select_elements_by_id_mcp_tool(element_ids=function_args.get("element_ids", []))
-                    elif function_name == SELECT_ELEMENTS_BY_CATEGORY_TOOL_NAME:
-                        tool_result_data = select_elements_by_category_mcp_tool(category_name=function_args.get("category_name"))
+                    elif function_name == SELECT_STORED_ELEMENTS_TOOL_NAME:
+                        tool_result_data = select_stored_elements_mcp_tool(category_name=function_args.get("category_name"))
+                    elif function_name == LIST_STORED_ELEMENTS_TOOL_NAME:
+                        tool_result_data = list_stored_elements_mcp_tool()
+                    elif function_name == FILTER_ELEMENTS_TOOL_NAME:
+                        tool_result_data = filter_elements_mcp_tool(category_name=function_args.get("category_name"), level_name=function_args.get("level_name"), parameters=function_args.get("parameters", []))
+                    elif function_name == GET_ELEMENT_PROPERTIES_TOOL_NAME:
+                        tool_result_data = get_element_properties_mcp_tool(element_ids=function_args.get("element_ids", []), parameter_names=function_args.get("parameter_names", []))
+                    elif function_name == UPDATE_ELEMENT_PARAMETERS_TOOL_NAME:
+                        tool_result_data = update_element_parameters_mcp_tool(updates=function_args.get("updates", []))
+                    elif function_name == PLANNER_TOOL_NAME:
+                        tool_result_data = plan_and_execute_workflow_tool(
+                            user_request=function_args.get("user_request"),
+                            execution_plan=function_args.get("execution_plan", [])
+                        )
                     else:
                         app.logger.warning(f"Google: Unknown tool {function_name} called.")
                         tool_result_data = {"status": "error", "message": f"Unknown tool '{function_name}' requested by LLM."}
-
-                    if function_name == GET_REVIT_VIEW_TOOL_NAME and tool_result_data.get("status") == "success" and "image_data" in tool_result_data.get("data", {}):
-                        image_output_for_frontend = tool_result_data["data"]
 
                     function_response_part = google_types.Part(
                         function_response=google_types.FunctionResponse(name=function_name, response=tool_result_data)
