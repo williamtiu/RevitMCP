@@ -1,46 +1,70 @@
-# RevitMCP: Revit Model Content Protocol Extension
+# RevitMCP: Revit Model Content Protocol External Server
 
 ## Introduction
 
-RevitMCP (Revit Model Content Protocol) is a pyRevit extension that allows external applications, such as AI assistants or other services, to interact with a running instance of Autodesk Revit. It achieves this by exposing an HTTP API from within Revit using pyRevit's "Routes" functionality. An external server component (typically `server.py` in this project) acts as an intermediary, which the external application communicates with. This intermediary server then makes calls to the API hosted by pyRevit within Revit.
+This document describes the **RevitMCP External Server**, a Python-based Flask application that acts as an intermediary between a Large Language Model (LLM) and a running instance of Autodesk Revit. The broader RevitMCP system leverages pyRevit to expose a Revit API, and this external server provides a user interface (chat) and handles communication with various LLM providers (OpenAI, Anthropic, Google Gemini, Ollama) to translate natural language commands into Revit actions.
 
-This README provides instructions on how to set up and use the `RevitMCP.extension`.
-
-## Prerequisites
-
-1.  **Autodesk Revit:** A compatible version of Autodesk Revit must be installed.
-2.  **pyRevit:** pyRevit must be installed for your Revit version. If you don't have it, download and install it from [pyrevitlabs.io](https://pyrevitlabs.io/).
+The primary goal is to enable users to interact with and modify their Revit models using conversational AI, with the LLM planning and executing Revit operations via a suite of defined tools.
 
 ## Installation
 
-1.  **Install pyRevit:**
-    *   Follow the official installation guide on the [pyRevit website](https://pyrevitlabs.io/docs/pyrevit/installer).
+1.  **Prerequisites:**
+    *   Python 3.7+
+    *   Access to a Revit installation (for the Revit-side listener, which is part of the broader RevitMCP extension).
+    *   An Ollama server instance if you intend to use local LLMs via Ollama.
+2.  **Setup:**
+    *   Clone this repository (or ensure the `RevitMCP.extension/lib/RevitMCP_ExternalServer/` directory is available).
+    *   Navigate to the `RevitMCP.extension/lib/RevitMCP_ExternalServer/` directory.
+    *   Install required Python packages:
+        ```bash
+        pip install -r requirements.txt
+        ```
+3.  **Revit-Side Setup:**
+    *   This external server is designed to work in conjunction with the main `RevitMCP.extension` for pyRevit. Ensure the accompanying RevitMCP extension (which includes the Revit listener component `startup.py`) is correctly installed and enabled in your pyRevit setup. Please refer to the documentation for the `RevitMCP.extension` for details on installing pyRevit extensions. The pyRevit listener must be active for this external server to communicate with Revit.
 
-2.  **Install the `RevitMCP.extension`:**
-    *   Locate your pyRevit extensions folder. You can typically find this by:
-        *   Opening pyRevit Settings in Revit (pyRevit Tab -> Settings).
-        *   Going to the "Extensions" section. It might show registered extension paths.
-        *   Common default locations include:
-            *   `%APPDATA%/pyRevit/Extensions`
-            *   `%PROGRAMDATA%/pyRevit/Extensions`
-    *   Copy the entire `RevitMCP.extension` folder (which contains `startup.py`, `lib/`, etc.) into one of your pyRevit extensions directories.
+## Quick Start
 
-3.  **Reload pyRevit / Restart Revit:**
-    *   After copying the extension, either "Reload" pyRevit (from the pyRevit tab in Revit) or restart Revit to ensure the extension is recognized and its `startup.py` script is executed.
+1.  **Run the External Server:**
+    Navigate to the `RevitMCP.extension/lib/RevitMCP_ExternalServer/` directory and run:
+    ```bash
+    python server.py
+    ```
+    By default, the server starts on `http://localhost:8000`. You can check the console output for the exact URL.
+2.  **Open the Chat UI:**
+    Open your web browser and go to `http://localhost:8000` (or the port shown in the server console).
+3.  **Configure LLM Providers:**
+    *   Click the settings icon (⋮) in the chat UI's sidebar.
+    *   Enter your API keys for OpenAI, Anthropic, or Google Gemini as needed.
+    *   **For Ollama:**
+        *   Select "Ollama (Configure in Settings)" from the model dropdown in the main UI first (this makes it your "Preferred Model" if you save settings, or just the active one for the session).
+        *   In Settings:
+            *   Enter your Ollama server URL (e.g., `http://localhost:11434`).
+            *   Enter the specific Ollama model name you wish to use (e.g., `llama3:instruct`, `mistral`).
+            *   Optionally, provide an API key if your Ollama instance is behind a proxy requiring one (this is sent as a Bearer token).
+    *   Save settings.
+4.  **Select Model & Chat:**
+    *   Choose your desired LLM provider and model from the dropdown in the main chat interface. If you configured Ollama, ensure "Ollama (Configure in Settings)" is selected.
+    *   Start interacting with Revit by typing commands!
 
-## Configuration
+**Example Prompts:**
+*   "What is the name of the current project?"
+*   "List all walls in the model and store them."
+*   "Select the walls you just listed."
+*   (Using a configured Ollama model) "Create a 'Generic - 200mm' wall on 'Level 1' from x=0,y=0,z=0 to x=5000,y=0,z=0."
+*   "Create a floor of type 'Generic - 150mm' on 'Level 1' with boundary points at (0,0,0), (10000,0,0), (10000,5000,0), and (0,5000,0)."
+*   "Use the planner to: first, find all doors on Level 1; second, get their 'Width' property; third, select them."
 
-1.  **Enable pyRevit Routes Server:**
-    *   Open Revit.
-    *   Go to the **pyRevit Tab -> Settings**.
-    *   Find the section related to **"Routes"** or **"Web Server"** or **"API"**.
-    *   **Enable the Routes server.**
-    *   Note the **default port number**, which is typically `48884` for the first Revit instance. Subsequent Revit instances will use incrementing port numbers (e.g., `48885`, `48886`). Your external server (`server.py`) must be configured to point to the correct port.
-    *   **Restart Revit** after enabling the Routes server if prompted or to ensure the settings take effect. The `startup.py` script in `RevitMCP.extension` defines the API endpoints when pyRevit loads.
+## Configuration Options
 
-2.  **Firewall/Network Access:**
-    *   When the pyRevit Routes server starts for the first time, your operating system's firewall might ask for permission to allow Revit (or the Python process within Revit) to open a network port and listen for incoming connections. You must **allow this access** for the system to work.
-    *   Ensure that no other firewall or security software is blocking connections to the port used by the pyRevit Routes server (e.g., `48884`).
+All configurations are managed via the Settings modal (⋮ icon in the sidebar) in the web UI. These settings are stored in your browser's `localStorage`.
+
+*   **OpenAI API Key:** Your secret API key for OpenAI services.
+*   **Anthropic API Key:** Your secret API key for Anthropic services.
+*   **Google API Key:** Your secret API key for Google Gemini services.
+*   **Ollama Server URL:** The full URL of your running Ollama server (e.g., `http://localhost:11434`). This is required if using the "Ollama (Configure in Settings)" model.
+*   **Ollama Model Name:** The specific model identifier for your Ollama server (e.g., `llama3:instruct`, `mistral`, `codellama:latest`). This name is passed directly to your Ollama server. Required for Ollama.
+*   **Ollama API Key (Optional Token):** An optional Bearer token if your Ollama server is accessed through a proxy that requires authentication.
+*   **Preferred Model:** Select your default model to be active when the UI loads. This applies to all providers, including the "Ollama (Configure in Settings)" option.
 
 ## Ollama Support
 
@@ -100,24 +124,53 @@ The system consists of two main parts that need to be running:
 | Functionality Verification                |                                    | ⬜ Todo     | Requires live testing of all LLM integrations & features |
 | Synchronized Documentation (README, comments) | 1.0.0_001_20240729                 | ✅ Done     | README updated; code comments reviewed.          |
 | Final Step-by-Step Review                 | 1.0.0_001_20240729                 | ✅ Done     | This review.                                     |
+| Create Wall and Floor Tools               | 1.0.0_003_20240729                 | ✅ Done     | Implemented in `server.py` & added to LLM specs.                  |
+| Comprehensive README Update               | 1.0.0_003_20240729                 | ✅ Done     | This update.                                                        |
+
+## FAQ
+
+*   **Q: What are the `*.mcp_tool` functions in `server.py`?**
+    A: These are Python functions registered with the `FastMCP` server instance using the `@mcp_server.tool()` decorator. This registration makes them available as "tools" that the configured LLMs can request to call as part of their response, enabling them to interact with Revit or perform other server-side actions. The server then dispatches these requests to the actual Python functions, which typically interact with Revit via the `call_revit_listener` function.
+
+*   **Q: How does Ollama tool calling work?**
+    A: The server uses Ollama's OpenAI-compatible `/v1/chat/completions` endpoint. Tool specifications are provided to the Ollama model in a format similar to OpenAI's function calling. The success of tool calling (i.e., the LLM correctly identifying when to use a tool and providing the right arguments) heavily depends on the specific Ollama model's capabilities to understand and respond to these function-calling prompts.
+
+*   **Q: What units should I use when specifying coordinates or dimensions for creation tools?**
+    A: For tools like `create_wall`, `create_floor`, etc., provide numerical values in Revit's internal units. Typically, this is decimal feet for length measurements if your Revit project template is imperial, or millimeters if your Revit project is metric. The LLM should be prompted accordingly if specific units are desired by the user (e.g., "create a wall 10 feet long"). For best results, prompt with numerical values assuming the Revit project's internal units, or explicitly state the units in the prompt and expect the LLM to handle any necessary conversion if it's capable.
+
+*   **Q: Where can I find the list of available Revit categories or type names (e.g., for walls, floors)?**
+    A: You can ask the assistant "What Revit categories are commonly available?" or "List available wall types in the project." These types of queries may rely on the LLM's general knowledge or specific tools designed to list types from the current project (if such tools are implemented). For precise names available in your specific Revit project, you might need to refer to your Revit project environment directly or use tools that can list these types (e.g., `get_elements_by_category` can show instance names, which might inform type usage).
 
 ## Troubleshooting
 
-*   **Route Not Found Errors (`RouteHandlerNotDefinedException`):**
-    *   Ensure `RevitMCP.extension/startup.py` exists and contains the route definitions.
-    *   Reload pyRevit or Restart Revit after any changes to `startup.py`.
-    *   Check pyRevit logs for messages from `startup.py` indicating it ran and defined the routes.
-    *   Ensure the pyRevit Routes server is enabled in pyRevit Settings and Revit was restarted.
-    *   Use the diagnostic script (provided during development) in a pyRevit-aware Python console within Revit to check `routes.get_routes("revit-mcp-v1")` and `routes.get_active_server()`.
+*   **Cannot connect to Revit Listener / Revit API:**
+    *   Ensure the main `RevitMCP.extension` (including `startup.py`) is correctly installed and loaded in pyRevit within your Revit application.
+    *   The external server (`server.py`) attempts to auto-detect the Revit listener port (common ports are 48884, 48885, 48886). Check the `server.py` console output for messages about which port it's trying to use or if detection failed (it defaults to 48884 if not detected).
+    *   Verify that no firewall is blocking communication between the Python server (`server.py`) and Revit, especially if they are on the same machine (localhost).
+    *   Check pyRevit logs within Revit for any errors related to the `RevitMCP.extension` or its routes.
 
-*   **Connection Refused / Cannot Connect to pyRevit Routes API:**
-    *   Verify the pyRevit Routes server is enabled in pyRevit Settings.
-    *   Confirm the port number used by the external server to call the pyRevit API matches the port the pyRevit Routes server is actually listening on (default `48884`).
-    *   Check firewall settings.
+*   **Ollama requests fail:**
+    *   Ensure your Ollama server is running and accessible at the URL specified in the RevitMCP chat UI settings.
+    *   Verify the model name specified in the settings (e.g., `llama3:instruct`) is available on your Ollama server. You can check this by running `ollama list` in your terminal where Ollama server is running.
+    *   If using a proxy for Ollama, ensure the optional API key/Bearer token is correctly entered if required by your proxy.
+    *   Check the `RevitMCP.extension/lib/RevitMCP_ExternalServer/server_logs/server_app.log` file for detailed error messages from the external server.
 
-*   **Check Logs:**
-    *   **pyRevit Logs:** (pyRevit Tab -> Settings -> Logging) for errors related to `RevitMCP.extension` loading, `startup.py` execution, or the Routes server.
-    *   **External Server (`server.py`) Logs:** Check the console output of your `server.py` for errors when it tries to communicate with the pyRevit Routes API or when it's handling requests from the client application.
+*   **LLM Tool calls don't work as expected:**
+    *   Some LLMs (especially smaller local models or those not specifically fine-tuned for function calling) may struggle with complex tool use or generating correctly formatted JSON arguments. Try simpler prompts or be more explicit in your instructions to the LLM.
+    *   Check the `server_app.log` for details on what arguments the LLM attempted to pass to the tool and any errors that occurred during tool execution.
+
+*   **Element creation tools (`create_wall`, `create_floor`) fail:**
+    *   Ensure the type names (e.g., "Generic - 200mm" for walls, "Generic - 150mm" for floors) exactly match type names available in your current Revit project. Case sensitivity might matter.
+    *   Check that coordinates and geometric inputs are valid for Revit (e.g., floor boundaries must form closed, non-self-intersecting loops).
+    *   Review the `server_app.log` and potentially the Revit journal files for more detailed error messages passed back from the Revit listener.
+
+*   **General Issues:**
+    *   Always check the `server_app.log` file located in `RevitMCP.extension/lib/RevitMCP_ExternalServer/server_logs/` for detailed error tracebacks.
+    *   Ensure your `requirements.txt` are installed for the Python environment running `server.py`.
+
+## Contact / Support
+
+For issues, questions, or contributions, please open an issue on the GitHub repository for this project. (Please replace this with the actual link to your project's repository when available.)
 
 ---
-This README should help users set up and understand the RevitMCP system. 
+This README should help users set up and understand the RevitMCP External Server system.
