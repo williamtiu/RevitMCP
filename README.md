@@ -89,11 +89,11 @@ The system consists of two main parts that need to be running:
 
 ## Development Status & Task List
 
-| Task                                      | Version & Last Update              | Status      | Notes/Links                                      |
-|-------------------------------------------|------------------------------------|-------------|--------------------------------------------------|
-| Add Ollama support                        | 1.0.0_001_20240729                 | ✅ Done     | Implemented in `server.py`                       |
-| Add UI for Ollama URL and port input      | 1.0.0_001_20240729                 | ✅ Done     | Added to `index.html` settings modal             |
-| Add test cases in the web UI              | 1.0.0_001_20240729                 | ✅ Done     | Added modal and JS logic in `index.html`         |
+| Task                                      | Version & Last Update              | Status      | Notes/Links                                                         |
+|-------------------------------------------|------------------------------------|-------------|---------------------------------------------------------------------|
+| Add Ollama support                        | 1.0.0_002_20240729                 | ✅ Done     | Implemented in `server.py`; refined with `/v1/completions` endpoint. |
+| Add UI for Ollama URL and port input      | 1.0.0_001_20240729                 | ✅ Done     | Added to `index.html` settings modal                                |
+| Add test cases in the web UI              | 1.0.0_001_20240729                 | ✅ Done     | Added modal and JS logic in `index.html`                            |
 | Update documentation                      | 1.0.0_001_20240729                 | ✅ Done     | Updated README.md with new features & task table |
 | Full Code Review for consistency          | 1.0.0_001_20240729                 | ✅ Done     | Conceptual review completed.                     |
 | Comprehensive Task Tracking               | 1.0.0_001_20240729                 | ✅ Done     | This table is up-to-date.                        |
