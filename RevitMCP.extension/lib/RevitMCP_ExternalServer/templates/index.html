@@ -466,11 +466,8 @@
                             <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                             <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                         </optgroup>
-                        <optgroup label="Ollama">
-                            <option value="ollama-mistral">Ollama - Mistral</option>
-                            <option value="ollama-llama2">Ollama - Llama2</option>
-                            <option value="ollama-codellama">Ollama - CodeLlama</option>
-                            <option value="ollama-custom">Ollama - Custom</option>
+                        <optgroup label="Local LLM">
+                            <option value="ollama_configured">Ollama (Configure in Settings)</option>
                         </optgroup>
                     </select>
                     <!-- API Key input removed from here -->
@@ -504,6 +501,12 @@
 
             <label for="ollama-server-url">Ollama Server URL:</label>
             <input type="text" id="ollama-server-url" name="ollama-server-url" placeholder="e.g., http://localhost:11434">
+
+            <label for="ollama-model-name">Ollama Model Name:</label>
+            <input type="text" id="ollama-model-name" name="ollama-model-name" placeholder="e.g., llama3:instruct, mistral">
+
+            <label for="ollama-api-key">Ollama API Key (Optional Token):</label>
+            <input type="password" id="ollama-api-key" name="ollama-api-key" placeholder="Optional Bearer token for proxy">
 
             <label for="preferred-model">Preferred Model:</label>
             <select id="preferred-model" name="preferred-model">
@@ -556,7 +559,9 @@
         const openaiApiKeyInput = document.getElementById('openai-api-key');
         const anthropicApiKeyInput = document.getElementById('anthropic-api-key');
         const googleApiKeyInput = document.getElementById('google-api-key');
-        const ollamaServerUrlInput = document.getElementById('ollama-server-url'); // Added
+        const ollamaServerUrlInput = document.getElementById('ollama-server-url');
+        const ollamaModelNameInput = document.getElementById('ollama-model-name'); // Added
+        const ollamaApiKeyInput = document.getElementById('ollama-api-key'); // Added (for token)
         const preferredModelSelect = document.getElementById('preferred-model');
         const settingsStatus = document.getElementById('settings-status');
 
@@ -624,7 +629,9 @@
             openaiApiKeyInput.value = localStorage.getItem('revitMCP_openai_api_key') || '';
             anthropicApiKeyInput.value = localStorage.getItem('revitMCP_anthropic_api_key') || '';
             googleApiKeyInput.value = localStorage.getItem('revitMCP_google_api_key') || '';
-            ollamaServerUrlInput.value = localStorage.getItem('revitMCP_ollama_server_url') || 'http://localhost:11434'; // Added
+            ollamaServerUrlInput.value = localStorage.getItem('revitMCP_ollama_server_url') || 'http://localhost:11434';
+            ollamaModelNameInput.value = localStorage.getItem('revitMCP_ollama_model_name') || 'llama2'; // Added
+            ollamaApiKeyInput.value = localStorage.getItem('revitMCP_ollama_api_key_token') || ''; // Added
             
             // Populate the preferred model selector by copying options from the main model selector
             preferredModelSelect.innerHTML = modelSelector.innerHTML;
@@ -648,7 +655,9 @@
             localStorage.setItem('revitMCP_openai_api_key', openaiApiKeyInput.value.trim());
             localStorage.setItem('revitMCP_anthropic_api_key', anthropicApiKeyInput.value.trim());
             localStorage.setItem('revitMCP_google_api_key', googleApiKeyInput.value.trim());
-            localStorage.setItem('revitMCP_ollama_server_url', ollamaServerUrlInput.value.trim()); // Added
+            localStorage.setItem('revitMCP_ollama_server_url', ollamaServerUrlInput.value.trim());
+            localStorage.setItem('revitMCP_ollama_model_name', ollamaModelNameInput.value.trim()); // Added
+            localStorage.setItem('revitMCP_ollama_api_key_token', ollamaApiKeyInput.value.trim()); // Added
             localStorage.setItem('revitMCPselectedModel', preferredModelSelect.value);
             
             settingsStatus.textContent = 'Settings saved!';
@@ -905,6 +914,12 @@
                 model: selectedModelValue,
                 apiKey: apiKeyToUse // This will be the specific key for the selected model's provider
             };
+
+            if (selectedModelValue === 'ollama_configured') {
+                payload.ollama_server_url = localStorage.getItem('revitMCP_ollama_server_url') || 'http://localhost:11434';
+                payload.ollama_model_name = localStorage.getItem('revitMCP_ollama_model_name') || 'llama2';
+                // payload.apiKey will already be set by getApiKeyForModel to the ollama_api_key_token
+            }
             
             messageInput.value = '';
             statusDiv.textContent = 'Sending...';
@@ -1057,8 +1072,8 @@
                 return localStorage.getItem('revitMCP_anthropic_api_key') || '';
             } else if (modelName.startsWith('gemini-')) {
                 return localStorage.getItem('revitMCP_google_api_key') || '';
-            } else if (modelName.startsWith('ollama-')) {
-                return localStorage.getItem('revitMCP_ollama_server_url') || 'http://localhost:11434'; // Added
+            } else if (modelName === 'ollama_configured') { // Changed condition
+                return localStorage.getItem('revitMCP_ollama_api_key_token') || ''; // Return the optional token
             }
             // For 'echo_model' or any other model not matching known prefixes, no API key is needed by the backend.
             return ''; 

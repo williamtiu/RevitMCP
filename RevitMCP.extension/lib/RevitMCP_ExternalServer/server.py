@@ -156,6 +156,9 @@ try:
     # Replace batch workflow with generic planner
     PLANNER_TOOL_NAME = "plan_and_execute_workflow"
 
+    CREATE_WALL_TOOL_NAME = "create_wall"
+    CREATE_FLOOR_TOOL_NAME = "create_floor"
+
     # --- Helper function to call Revit Listener (remains mostly the same) ---
     # This function is now central for all Revit interactions triggered by MCP tools.
     def call_revit_listener(command_path: str, method: str = 'POST', payload_data: dict = None):
@@ -405,6 +408,41 @@ try:
         
         return call_revit_listener(command_path='/elements/update_parameters', method='POST', payload_data={"updates": updates})
 
+    @mcp_server.tool(name=CREATE_WALL_TOOL_NAME)
+    def create_wall_mcp_tool(wall_type_name: str, level_name: str, start_point: dict, end_point: dict, height: float = None, structural: bool = False) -> dict:
+        """Creates a new wall in the Revit model.
+        Requires wall type, level, start and end points. Height is optional if determined by level constraints.
+        Start and end points should be dictionaries with 'x', 'y', 'z' keys.
+        Example: start_point={"x":0.0, "y":0.0, "z":0.0}, end_point={"x":10.0, "y":0.0, "z":0.0}
+        """
+        app.logger.info(f"MCP Tool executed: {CREATE_WALL_TOOL_NAME} with type '{wall_type_name}' on level '{level_name}'")
+        payload = {
+            "wall_type_name": wall_type_name,
+            "level_name": level_name,
+            "start_point": start_point,
+            "end_point": end_point,
+            "structural": structural
+        }
+        if height is not None:
+            payload["height"] = height
+        return call_revit_listener(command_path='/elements/create_wall', method='POST', payload_data=payload)
+
+    @mcp_server.tool(name=CREATE_FLOOR_TOOL_NAME)
+    def create_floor_mcp_tool(floor_type_name: str, level_name: str, boundary_points: list[dict], structural: bool = False) -> dict:
+        """Creates a new floor in the Revit model.
+        Requires floor type, level, and a list of boundary points forming a closed loop.
+        Each point in boundary_points should be a dictionary with 'x', 'y', 'z' keys.
+        Example: boundary_points=[{"x":0,"y":0,"z":0}, {"x":10,"y":0,"z":0}, {"x":10,"y":10,"z":0}, {"x":0,"y":10,"z":0}]
+        """
+        app.logger.info(f"MCP Tool executed: {CREATE_FLOOR_TOOL_NAME} with type '{floor_type_name}' on level '{level_name}'")
+        payload = {
+            "floor_type_name": floor_type_name,
+            "level_name": level_name,
+            "boundary_points": boundary_points,
+            "structural": structural
+        }
+        return call_revit_listener(command_path='/elements/create_floor', method='POST', payload_data=payload)
+
     @mcp_server.tool(name=PLANNER_TOOL_NAME)
     def plan_and_execute_workflow_tool(user_request: str, execution_plan: list[dict]) -> dict:
         """
@@ -451,7 +489,21 @@ try:
             "select_stored_elements": lambda **kwargs: select_stored_elements_mcp_tool(
                 kwargs.get("category_name")
             ),
-            "list_stored_elements": list_stored_elements_mcp_tool
+            "list_stored_elements": list_stored_elements_mcp_tool,
+            "create_wall": lambda **kwargs: create_wall_mcp_tool(
+                kwargs.get("wall_type_name"),
+                kwargs.get("level_name"),
+                kwargs.get("start_point"),
+                kwargs.get("end_point"),
+                kwargs.get("height"),
+                kwargs.get("structural", False)
+            ),
+            "create_floor": lambda **kwargs: create_floor_mcp_tool(
+                kwargs.get("floor_type_name"),
+                kwargs.get("level_name"),
+                kwargs.get("boundary_points"),
+                kwargs.get("structural", False)
+            ),
         }
         
         try:
@@ -670,6 +722,50 @@ try:
         "required": ["user_request", "execution_plan"]
     }
 
+    CREATE_WALL_TOOL_DESCRIPTION_FOR_LLM = "Creates a new wall in the Revit model. Requires wall type name (e.g., 'Generic - 200mm'), level name (e.g., 'Level 1'), start point (e.g., {'x':0,'y':0,'z':0}), and end point (e.g., {'x':3000,'y':0,'z':0}). Height is optional and can be specified in millimeters. Structural flag is optional."
+    CREATE_WALL_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object",
+        "properties": {
+            "wall_type_name": {"type": "string", "description": "Name of the wall type to use."},
+            "level_name": {"type": "string", "description": "Name of the level on which to place the wall."},
+            "start_point": {
+                "type": "object",
+                "properties": {"x":{"type":"number"}, "y":{"type":"number"}, "z":{"type":"number"}},
+                "required": ["x","y","z"],
+                "description": "Start XYZ coordinates of the wall baseline."
+            },
+            "end_point": {
+                "type": "object",
+                "properties": {"x":{"type":"number"}, "y":{"type":"number"}, "z":{"type":"number"}},
+                "required": ["x","y","z"],
+                "description": "End XYZ coordinates of the wall baseline."
+            },
+            "height": {"type": "number", "description": "Optional height of the wall in Revit's internal units (typically feet, or mm if project units are metric and handled by listener)."},
+            "structural": {"type": "boolean", "description": "Optional. True if the wall is structural, false otherwise. Defaults to false."}
+        },
+        "required": ["wall_type_name", "level_name", "start_point", "end_point"]
+    }
+
+    CREATE_FLOOR_TOOL_DESCRIPTION_FOR_LLM = "Creates a new floor in the Revit model. Requires floor type name (e.g., 'Generic - 150mm'), level name, and a list of boundary_points forming a closed loop (e.g., [{'x':0,'y':0,'z':0}, {'x':3000,'y':0,'z':0}, ...]). Structural flag is optional."
+    CREATE_FLOOR_TOOL_PARAMETERS_FOR_LLM = {
+        "type": "object",
+        "properties": {
+            "floor_type_name": {"type": "string", "description": "Name of the floor type to use."},
+            "level_name": {"type": "string", "description": "Name of the level on which to place the floor."},
+            "boundary_points": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"x":{"type":"number"}, "y":{"type":"number"}, "z":{"type":"number"}},
+                    "required": ["x","y","z"]
+                },
+                "description": "A list of XYZ coordinates forming a closed loop for the floor boundary."
+            },
+            "structural": {"type": "boolean", "description": "Optional. True if the floor is structural, false otherwise. Defaults to false."}
+        },
+        "required": ["floor_type_name", "level_name", "boundary_points"]
+    }
+
     REVIT_TOOLS_SPEC_FOR_LLMS = {
         "openai": [
             {"type": "function", "function": {"name": REVIT_INFO_TOOL_NAME, "description": REVIT_INFO_TOOL_DESCRIPTION_FOR_LLM, "parameters": {"type": "object", "properties": {}}}},
@@ -681,6 +777,8 @@ try:
             {"type": "function", "function": {"name": GET_ELEMENT_PROPERTIES_TOOL_NAME, "description": GET_ELEMENT_PROPERTIES_TOOL_DESCRIPTION_FOR_LLM, "parameters": GET_ELEMENT_PROPERTIES_TOOL_PARAMETERS_FOR_LLM}},
             {"type": "function", "function": {"name": UPDATE_ELEMENT_PARAMETERS_TOOL_NAME, "description": UPDATE_ELEMENT_PARAMETERS_TOOL_DESCRIPTION_FOR_LLM, "parameters": UPDATE_ELEMENT_PARAMETERS_TOOL_PARAMETERS_FOR_LLM}},
             {"type": "function", "function": {"name": PLANNER_TOOL_NAME, "description": PLANNER_TOOL_DESCRIPTION_FOR_LLM, "parameters": PLANNER_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": CREATE_WALL_TOOL_NAME, "description": CREATE_WALL_TOOL_DESCRIPTION_FOR_LLM, "parameters": CREATE_WALL_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": CREATE_FLOOR_TOOL_NAME, "description": CREATE_FLOOR_TOOL_DESCRIPTION_FOR_LLM, "parameters": CREATE_FLOOR_TOOL_PARAMETERS_FOR_LLM}},
         ],
         "anthropic": [
             {"name": REVIT_INFO_TOOL_NAME, "description": REVIT_INFO_TOOL_DESCRIPTION_FOR_LLM, "input_schema": {"type": "object", "properties": {}}},
@@ -692,6 +790,8 @@ try:
             {"name": GET_ELEMENT_PROPERTIES_TOOL_NAME, "description": GET_ELEMENT_PROPERTIES_TOOL_DESCRIPTION_FOR_LLM, "input_schema": GET_ELEMENT_PROPERTIES_TOOL_PARAMETERS_FOR_LLM},
             {"name": UPDATE_ELEMENT_PARAMETERS_TOOL_NAME, "description": UPDATE_ELEMENT_PARAMETERS_TOOL_DESCRIPTION_FOR_LLM, "input_schema": UPDATE_ELEMENT_PARAMETERS_TOOL_PARAMETERS_FOR_LLM},
             {"name": PLANNER_TOOL_NAME, "description": PLANNER_TOOL_DESCRIPTION_FOR_LLM, "input_schema": PLANNER_TOOL_PARAMETERS_FOR_LLM},
+            {"name": CREATE_WALL_TOOL_NAME, "description": CREATE_WALL_TOOL_DESCRIPTION_FOR_LLM, "input_schema": CREATE_WALL_TOOL_PARAMETERS_FOR_LLM},
+            {"name": CREATE_FLOOR_TOOL_NAME, "description": CREATE_FLOOR_TOOL_DESCRIPTION_FOR_LLM, "input_schema": CREATE_FLOOR_TOOL_PARAMETERS_FOR_LLM},
         ],
         "google": [
             google_types.Tool(function_declarations=[
@@ -704,7 +804,22 @@ try:
                 google_types.FunctionDeclaration(name=GET_ELEMENT_PROPERTIES_TOOL_NAME, description=GET_ELEMENT_PROPERTIES_TOOL_DESCRIPTION_FOR_LLM, parameters=GET_ELEMENT_PROPERTIES_TOOL_PARAMETERS_FOR_LLM),
                 google_types.FunctionDeclaration(name=UPDATE_ELEMENT_PARAMETERS_TOOL_NAME, description=UPDATE_ELEMENT_PARAMETERS_TOOL_DESCRIPTION_FOR_LLM, parameters=UPDATE_ELEMENT_PARAMETERS_TOOL_PARAMETERS_FOR_LLM),
                 google_types.FunctionDeclaration(name=PLANNER_TOOL_NAME, description=PLANNER_TOOL_DESCRIPTION_FOR_LLM, parameters=PLANNER_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=CREATE_WALL_TOOL_NAME, description=CREATE_WALL_TOOL_DESCRIPTION_FOR_LLM, parameters=CREATE_WALL_TOOL_PARAMETERS_FOR_LLM),
+                google_types.FunctionDeclaration(name=CREATE_FLOOR_TOOL_NAME, description=CREATE_FLOOR_TOOL_DESCRIPTION_FOR_LLM, parameters=CREATE_FLOOR_TOOL_PARAMETERS_FOR_LLM),
             ])
+        ],
+        "ollama": [
+            {"type": "function", "function": {"name": REVIT_INFO_TOOL_NAME, "description": REVIT_INFO_TOOL_DESCRIPTION_FOR_LLM, "parameters": {"type": "object", "properties": {}}}},
+            {"type": "function", "function": {"name": GET_ELEMENTS_BY_CATEGORY_TOOL_NAME, "description": GET_ELEMENTS_BY_CATEGORY_TOOL_DESCRIPTION_FOR_LLM, "parameters": GET_ELEMENTS_BY_CATEGORY_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": SELECT_ELEMENTS_TOOL_NAME, "description": SELECT_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "parameters": SELECT_ELEMENTS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": SELECT_STORED_ELEMENTS_TOOL_NAME, "description": SELECT_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "parameters": SELECT_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": LIST_STORED_ELEMENTS_TOOL_NAME, "description": LIST_STORED_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "parameters": LIST_STORED_ELEMENTS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": FILTER_ELEMENTS_TOOL_NAME, "description": FILTER_ELEMENTS_TOOL_DESCRIPTION_FOR_LLM, "parameters": FILTER_ELEMENTS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": GET_ELEMENT_PROPERTIES_TOOL_NAME, "description": GET_ELEMENT_PROPERTIES_TOOL_DESCRIPTION_FOR_LLM, "parameters": GET_ELEMENT_PROPERTIES_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": UPDATE_ELEMENT_PARAMETERS_TOOL_NAME, "description": UPDATE_ELEMENT_PARAMETERS_TOOL_DESCRIPTION_FOR_LLM, "parameters": UPDATE_ELEMENT_PARAMETERS_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": PLANNER_TOOL_NAME, "description": PLANNER_TOOL_DESCRIPTION_FOR_LLM, "parameters": PLANNER_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": CREATE_WALL_TOOL_NAME, "description": CREATE_WALL_TOOL_DESCRIPTION_FOR_LLM, "parameters": CREATE_WALL_TOOL_PARAMETERS_FOR_LLM}},
+            {"type": "function", "function": {"name": CREATE_FLOOR_TOOL_NAME, "description": CREATE_FLOOR_TOOL_DESCRIPTION_FOR_LLM, "parameters": CREATE_FLOOR_TOOL_PARAMETERS_FOR_LLM}},
         ]
     }
     app.logger.info("Manual tool specs for LLMs defined.")
@@ -990,75 +1105,126 @@ Use plan_and_execute_workflow for multi-step operations to provide complete resu
                 else:
                     model_reply_text = gemini_response.text
 
-            # --- Ollama Models ---
-            elif selected_model_ui_name.startswith('ollama-'):
-                app.logger.info(f"Ollama model selected: {selected_model_ui_name}")
-                ollama_server_url = api_key # API key field is used for Ollama server URL
+            # --- Ollama Models (OpenAI Compatible Tool Calling) ---
+            elif selected_model_ui_name == 'ollama_configured': # Trigger changed
+                ollama_model_name = data.get('ollama_model_name')
+                ollama_server_url = data.get('ollama_server_url')
+                ollama_token = api_key # api_key is now repurposed as optional Bearer token
 
-                if not ollama_server_url:
-                    error_message_for_frontend = "Ollama server URL is missing. Please configure it in the API key field."
-                    app.logger.error("Ollama: Server URL not provided via API key field.")
+                app.logger.info(f"Ollama (Tool Call Mode) selected. Model: {ollama_model_name}, Server: {ollama_server_url}")
+
+                if not ollama_server_url or not ollama_model_name:
+                    error_message_for_frontend = "Ollama server URL or model name is missing. Please configure them in settings."
+                    app.logger.error("Ollama (Tool Call Mode): Server URL or model name not provided.")
                 else:
                     try:
-                        # Extract actual model name, e.g., "mistral" from "ollama-mistral"
-                        extracted_ollama_model_name = selected_model_ui_name.split('-', 1)[1]
-                        ollama_api_url = f"{ollama_server_url.rstrip('/')}/v1/completions" # Updated endpoint
-                        app.logger.info(f"Ollama: Connecting to {ollama_api_url} for model {extracted_ollama_model_name} using /v1/completions")
+                        ollama_api_url = f"{ollama_server_url.rstrip('/')}/v1/chat/completions" # New endpoint
+                        app.logger.info(f"Ollama (Tool Call Mode): Connecting to {ollama_api_url} for model {ollama_model_name}")
 
-                        # Prepare prompt for Ollama /v1/completions
-                        if not conversation_history:
-                            raise ValueError("Conversation history is empty, cannot generate prompt for Ollama.")
+                        headers = {'Content-Type': 'application/json'}
+                        if ollama_token: # Optional Bearer token
+                            headers['Authorization'] = f'Bearer {ollama_token}'
 
-                        last_user_message = conversation_history[-1]['content']
-                        # Ensure planning_system_prompt is defined and accessible
-                        # If planning_system_prompt is a dict like {"role": "system", "content": "..."}
-                        prompt_for_ollama = planning_system_prompt["content"] + "\n\nUser: " + last_user_message
+                        messages_for_llm = [planning_system_prompt] + \
+                                           [{"role": "assistant" if msg['role'] == 'bot' else msg['role'],
+                                             "content": msg['content']} for msg in conversation_history]
 
                         ollama_payload = {
-                            "model": extracted_ollama_model_name,
-                            "prompt": prompt_for_ollama,
-                            "max_tokens": 128,  # As per user example
-                            "temperature": 0.7  # As per user example
-                            # "stream": False, # /v1/completions usually doesn't use stream in payload directly like /api/chat
+                            "model": ollama_model_name,
+                            "messages": messages_for_llm,
+                            "tools": REVIT_TOOLS_SPEC_FOR_LLMS['ollama'], # Using the new Ollama tool spec
+                            "tool_choice": "auto"
                         }
 
-                        app.logger.debug(f"Ollama (/v1/completions): Sending payload: {json.dumps(ollama_payload, indent=2)}")
+                        app.logger.debug(f"Ollama (Tool Call Mode): Sending initial payload: {json.dumps(ollama_payload, indent=2)}")
 
-                        response = requests.post(
-                            ollama_api_url,
-                            json=ollama_payload,
-                            headers={'Content-Type': 'application/json'},
-                            timeout=120 # Increased timeout for local LLMs
-                        )
-                        response.raise_for_status() # Raise an exception for bad status codes
+                        response = requests.post(ollama_api_url, json=ollama_payload, headers=headers, timeout=120)
+                        response.raise_for_status()
 
-                        ollama_response_data = response.json()
-                        app.logger.debug(f"Ollama (/v1/completions): Received response data: {json.dumps(ollama_response_data, indent=2)}")
+                        response_data = response.json()
+                        app.logger.debug(f"Ollama (Tool Call Mode): Received initial response data: {json.dumps(response_data, indent=2)}")
 
-                        if ollama_response_data.get("choices") and \
-                           len(ollama_response_data["choices"]) > 0 and \
-                           ollama_response_data["choices"][0].get("text"):
-                            model_reply_text = ollama_response_data['choices'][0]['text'].strip()
-                            app.logger.info(f"Ollama: Successfully extracted reply from model {extracted_ollama_model_name} via /v1/completions.")
-                        else:
-                            model_reply_text = "Ollama model responded via /v1/completions, but content was not in the expected format."
-                            app.logger.warning(f"Ollama (/v1/completions): Response format unexpected: {ollama_response_data}")
+                        # Expecting OpenAI-like response structure
+                        if not response_data.get("choices") or not response_data["choices"][0].get("message"):
+                            raise ValueError("Ollama response did not contain expected 'choices' or 'message' structure.")
+
+                        response_message = response_data["choices"][0]["message"]
+                        tool_calls = response_message.get("tool_calls")
+
+                        if tool_calls:
+                            messages_for_llm.append(response_message) # Add assistant's turn with tool_calls
+                            app.logger.info(f"Ollama (Tool Call Mode): Received tool_calls: {tool_calls}")
+
+                            for tool_call in tool_calls:
+                                function_name = tool_call['function']['name']
+                                try:
+                                    function_args = json.loads(tool_call['function']['arguments'])
+                                except json.JSONDecodeError as e:
+                                    app.logger.error(f"Ollama (Tool Call Mode): Failed to parse function arguments for {function_name}: {tool_call['function']['arguments']}. Error: {e}")
+                                    tool_result_data = {"status": "error", "message": f"Invalid arguments from LLM for tool {function_name}."}
+                                else:
+                                    app.logger.info(f"Ollama (Tool Call Mode): Tool call requested: {function_name} with args: {function_args}")
+                                    # Dispatch to actual tool functions (mirroring OpenAI logic)
+                                    tool_result_data = {}
+                                    if function_name == REVIT_INFO_TOOL_NAME: tool_result_data = get_revit_project_info_mcp_tool()
+                                    elif function_name == GET_ELEMENTS_BY_CATEGORY_TOOL_NAME: tool_result_data = get_elements_by_category_mcp_tool(**function_args)
+                                    elif function_name == SELECT_ELEMENTS_TOOL_NAME: tool_result_data = select_elements_by_id_mcp_tool(**function_args)
+                                    elif function_name == SELECT_STORED_ELEMENTS_TOOL_NAME: tool_result_data = select_stored_elements_mcp_tool(**function_args)
+                                    elif function_name == LIST_STORED_ELEMENTS_TOOL_NAME: tool_result_data = list_stored_elements_mcp_tool()
+                                    elif function_name == FILTER_ELEMENTS_TOOL_NAME: tool_result_data = filter_elements_mcp_tool(**function_args)
+                                    elif function_name == GET_ELEMENT_PROPERTIES_TOOL_NAME: tool_result_data = get_element_properties_mcp_tool(**function_args)
+                                    elif function_name == UPDATE_ELEMENT_PARAMETERS_TOOL_NAME: tool_result_data = update_element_parameters_mcp_tool(**function_args)
+                                    elif function_name == PLANNER_TOOL_NAME: tool_result_data = plan_and_execute_workflow_tool(**function_args)
+                                    elif function_name == CREATE_WALL_TOOL_NAME: tool_result_data = create_wall_mcp_tool(**function_args)
+                                    elif function_name == CREATE_FLOOR_TOOL_NAME: tool_result_data = create_floor_mcp_tool(**function_args)
+                                    else:
+                                        app.logger.warning(f"Ollama (Tool Call Mode): Unknown tool {function_name} called.")
+                                        tool_result_data = {"status": "error", "message": f"Unknown tool '{function_name}' requested by LLM."}
+
+                                messages_for_llm.append({
+                                    "tool_call_id": tool_call['id'],
+                                    "role": "tool",
+                                    "name": function_name,
+                                    "content": json.dumps(tool_result_data)
+                                })
+
+                            app.logger.debug(f"Ollama (Tool Call Mode): Resending messages with tool results: {messages_for_llm}")
+                            # Second call to Ollama, this time without tools parameter if expecting text
+                            second_payload = {"model": ollama_model_name, "messages": messages_for_llm}
+                            second_response_raw = requests.post(ollama_api_url, json=second_payload, headers=headers, timeout=120)
+                            second_response_raw.raise_for_status()
+                            second_response_data = second_response_raw.json()
+
+                            if second_response_data.get("choices") and second_response_data["choices"][0].get("message") and \
+                               second_response_data["choices"][0]["message"].get("content"):
+                                model_reply_text = second_response_data["choices"][0]["message"]["content"]
+                            else:
+                                model_reply_text = "Ollama (Tool Call Mode) model responded after tool use, but content was not in the expected format."
+                                app.logger.warning(f"Ollama (Tool Call Mode): Second response format unexpected: {second_response_data}")
+
+                        else: # No tool calls in the first response
+                            if response_message.get("content"):
+                                model_reply_text = response_message["content"]
+                                app.logger.info(f"Ollama (Tool Call Mode): Successfully extracted direct reply from model {ollama_model_name}.")
+                            else:
+                                model_reply_text = "Ollama (Tool Call Mode) model responded, but direct content was missing."
+                                app.logger.warning(f"Ollama (Tool Call Mode): Direct response content missing: {response_data}")
 
                     except requests.exceptions.Timeout as e_timeout:
-                        error_message_for_frontend = f"Ollama (/v1/completions) request timed out: {e_timeout}. The local model might be too slow or the server is not responding."
-                        app.logger.error(f"Ollama (/v1/completions): Request timed out to {ollama_api_url}. Error: {e_timeout}", exc_info=True)
+                        error_message_for_frontend = f"Ollama (Tool Call Mode) request timed out: {e_timeout}."
+                        app.logger.error(f"Ollama (Tool Call Mode): Request timed out to {ollama_api_url}. Error: {e_timeout}", exc_info=True)
                     except requests.exceptions.ConnectionError as e_conn:
-                        error_message_for_frontend = f"Ollama (/v1/completions) connection error: {e_conn}. Is the Ollama server running at {ollama_server_url}?"
-                        app.logger.error(f"Ollama (/v1/completions): Connection error to {ollama_api_url}. Error: {e_conn}", exc_info=True)
+                        error_message_for_frontend = f"Ollama (Tool Call Mode) connection error: {e_conn}."
+                        app.logger.error(f"Ollama (Tool Call Mode): Connection error to {ollama_api_url}. Error: {e_conn}", exc_info=True)
                     except requests.exceptions.HTTPError as e_http:
-                        error_message_for_frontend = f"Ollama (/v1/completions) HTTP error: {e_http}. Status: {e_http.response.status_code}. Response: {e_http.response.text[:200]}"
-                        app.logger.error(f"Ollama (/v1/completions): HTTP error from {ollama_api_url}. Status: {e_http.response.status_code}. Error: {e_http}", exc_info=True)
+                        error_message_for_frontend = f"Ollama (Tool Call Mode) HTTP error: {e_http}. Status: {e_http.response.status_code}. Response: {e_http.response.text[:200]}"
+                        app.logger.error(f"Ollama (Tool Call Mode): HTTP error from {ollama_api_url}. Status: {e_http.response.status_code}. Error: {e_http}", exc_info=True)
                     except requests.exceptions.RequestException as e_req:
-                        error_message_for_frontend = f"Ollama (/v1/completions) request failed: {e_req}"
-                        app.logger.error(f"Ollama (/v1/completions): Request exception for {ollama_api_url}. Error: {e_req}", exc_info=True)
-                    except Exception as e_ollama: # Catch-all for other Ollama specific issues
-                        error_message_for_frontend = f"An error occurred while processing the Ollama (/v1/completions) request: {str(e_ollama)}"
-                        app.logger.error(f"Ollama (/v1/completions): Unexpected error for model {selected_model_ui_name}. Error: {e_ollama}", exc_info=True)
+                        error_message_for_frontend = f"Ollama (Tool Call Mode) request failed: {e_req}"
+                        app.logger.error(f"Ollama (Tool Call Mode): Request exception for {ollama_api_url}. Error: {e_req}", exc_info=True)
+                    except Exception as e_ollama:
+                        error_message_for_frontend = f"An error occurred while processing the Ollama (Tool Call Mode) request: {str(e_ollama)}"
+                        app.logger.error(f"Ollama (Tool Call Mode): Unexpected error for model {ollama_model_name}. Error: {e_ollama}", exc_info=True)
 
             else:
                 error_message_for_frontend = f"Model '{selected_model_ui_name}' is not recognized or supported."
