@@ -78,6 +78,19 @@ RevitMCP now supports integration with local LLMs through Ollama.
 4.  Save the settings.
 5.  Select an Ollama model from the "Ollama" group in the model selector (e.g., "Ollama - Mistral"). The name after "ollama-" (e.g., "mistral") will be used as the model name when communicating with your Ollama server. You can use "ollama-custom" and ensure the model name you want to use is available on your Ollama server (the server will use the part after "ollama-" if you selected "ollama-custom", so if you want to use a model named "my-special-model", you should ensure your Ollama server has "my-special-model" available and select "ollama-my-special-model" in the UI, or select "ollama-custom" and ensure your server has a model named "custom").
 
+### Tool Calling with Ollama
+
+RevitMCP attempts to enable full tool support with Ollama models using an OpenAI-compatible approach. However, not all models hosted via Ollama inherently support this direct tool-calling method.
+
+*   **Primary Method (Direct Tool Calling):** The server will first try to use direct tool calling if you are using an Ollama model known to be compatible with OpenAI-style function/tool parameters (e.g., some versions of Qwen2, Llama 3 with specific configurations, etc., accessed via Ollama's `/v1/chat/completions` endpoint).
+*   **Fallback Method (JSON-based Tool Requests):** If the selected Ollama model reports that it "does not support tools" via the direct method, the server will automatically attempt a fallback strategy. In this mode:
+    1.  The server re-prompts the Ollama model, asking it to return a specific JSON structure if it needs to use a tool (e.g., `{"tool_name": "tool_to_call", "tool_arguments": {...}}`).
+    2.  If the model responds with correctly formatted JSON, the server will parse it, execute the tool, and send the results back to the model to generate a final textual answer.
+*   **Model Capability is Key:** The success and reliability of tool usage with Ollama heavily depend on the chosen model's ability to either:
+    a.  Natively support OpenAI-style tool calling.
+    b.  Consistently follow instructions to generate the required JSON format for the fallback mechanism.
+*   **Troubleshooting:** If you experience issues with tool usage for a specific Ollama model, check the server logs (`RevitMCP/server_logs/server_app.log`) for details on which method was attempted and any errors encountered. Simpler models may not be able to use tools effectively even with the fallback.
+
 ## Test Case UI
 
 A "Test Cases" button (🧪) is available in the sidebar of the chat UI. Clicking this button opens a modal window with a list of predefined test prompts.
@@ -116,6 +129,8 @@ The system consists of two main parts that need to be running:
 | Task                                      | Version & Last Update              | Status      | Notes/Links                                                         |
 |-------------------------------------------|------------------------------------|-------------|---------------------------------------------------------------------|
 | Add Ollama support                        | 1.0.0_002_20240729                 | ✅ Done     | Implemented in `server.py`; refined with `/v1/completions` endpoint. |
+| Debug Ollama tool compatibility (deepseek/phi)        | AI (Jules) | 0.1.0_002_20240730    | ✅ Done     | Implemented fallback for models not supporting direct tool calls.            |
+| Implement fallback for Ollama non-tool-supporting models| AI (Jules) | 0.1.0_002_20240730    | ✅ Done     | Fallback prompts for JSON tool representation added to `server.py`.        |
 | Add UI for Ollama URL and port input      | 1.0.0_001_20240729                 | ✅ Done     | Added to `index.html` settings modal                                |
 | Add test cases in the web UI              | 1.0.0_001_20240729                 | ✅ Done     | Added modal and JS logic in `index.html`                            |
 | Update documentation                      | 1.0.0_001_20240729                 | ✅ Done     | Updated README.md with new features & task table                    |
@@ -145,6 +160,9 @@ The system consists of two main parts that need to be running:
 
 *   **Q: Where can I find the list of available Revit categories or type names (e.g., for walls, floors)?**
     A: You can ask the assistant "What Revit categories are commonly available?" or "List available wall types in the project." These types of queries may rely on the LLM's general knowledge or specific tools designed to list types from the current project (if such tools are implemented). For precise names available in your specific Revit project, you might need to refer to your Revit project environment directly or use tools that can list these types (e.g., `get_elements_by_category` can show instance names, which might inform type usage).
+
+*   **Q: Why do tools work with some of my Ollama models but not others?**
+    A: Tool support varies greatly between different Ollama models. RevitMCP tries a direct, OpenAI-compatible method first. If your model doesn't support that, a fallback method is used where the model is asked to output a JSON request for a tool. The success of this fallback depends on the model's ability to follow complex formatting instructions. For best results, use Ollama models known for strong function/tool calling or instruction-following capabilities. Check the server logs for more details if you encounter issues.
 
 ## Troubleshooting
 

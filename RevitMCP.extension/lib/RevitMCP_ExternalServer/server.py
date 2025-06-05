@@ -832,6 +832,18 @@ try:
     }
     app.logger.info("Configuration loaded.")
 
+    def get_simplified_tool_list_for_prompt(tools_spec):
+        prompt_tool_list = []
+        for tool_item in tools_spec:
+            func_spec = tool_item.get('function', {})
+            tool_name = func_spec.get('name')
+            description = func_spec.get('description', 'No description available.')
+            # Simplified parameters - focusing on names for now for brevity in prompt
+            params = func_spec.get('parameters', {}).get('properties', {})
+            param_names = list(params.keys())
+            prompt_tool_list.append(f"- {tool_name}: {description} (Args: {', '.join(param_names)})")
+        return "\n".join(prompt_tool_list)
+
     @app.route('/', methods=['GET'])
     def chat_ui():
         app.logger.info("Serving chat_ui (index.html)")
@@ -1117,9 +1129,16 @@ Use plan_and_execute_workflow for multi-step operations to provide complete resu
                     error_message_for_frontend = "Ollama server URL or model name is missing. Please configure them in settings."
                     app.logger.error("Ollama (Tool Call Mode): Server URL or model name not provided.")
                 else:
+                    ollama_api_url = f"{ollama_server_url.rstrip('/')}/v1/chat/completions" # Defined here for use in except block too
+                    headers = {'Content-Type': 'application/json'}
+                    if ollama_token:
+                        headers['Authorization'] = f'Bearer {ollama_token}'
+
+                    messages_for_llm = [planning_system_prompt] + \
+                                       [{"role": "assistant" if msg['role'] == 'bot' else msg['role'],
+                                         "content": msg['content']} for msg in conversation_history]
                     try:
-                        ollama_api_url = f"{ollama_server_url.rstrip('/')}/v1/chat/completions" # New endpoint
-                        app.logger.info(f"Ollama (Tool Call Mode): Connecting to {ollama_api_url} for model {ollama_model_name}")
+                        app.logger.info(f"Ollama (Tool Call Mode): Attempting direct tool call to {ollama_api_url} for model {ollama_model_name}")
 
                         headers = {'Content-Type': 'application/json'}
                         if ollama_token: # Optional Bearer token
@@ -1136,13 +1155,13 @@ Use plan_and_execute_workflow for multi-step operations to provide complete resu
                             "tool_choice": "auto"
                         }
 
-                        app.logger.debug(f"Ollama (Tool Call Mode): Sending initial payload: {json.dumps(ollama_payload, indent=2)}")
+                        app.logger.debug(f"Ollama (Tool Call Mode): Sending initial payload for direct tool call: {json.dumps(ollama_payload, indent=2)}")
 
                         response = requests.post(ollama_api_url, json=ollama_payload, headers=headers, timeout=120)
-                        response.raise_for_status()
+                        response.raise_for_status() # This will jump to HTTPError except block on 400 or other client/server errors
 
                         response_data = response.json()
-                        app.logger.debug(f"Ollama (Tool Call Mode): Received initial response data: {json.dumps(response_data, indent=2)}")
+                        app.logger.debug(f"Ollama (Tool Call Mode): Received initial response data for direct tool call: {json.dumps(response_data, indent=2)}")
 
                         # Expecting OpenAI-like response structure
                         if not response_data.get("choices") or not response_data["choices"][0].get("message"):
@@ -1177,12 +1196,13 @@ Use plan_and_execute_workflow for multi-step operations to provide complete resu
                                     elif function_name == PLANNER_TOOL_NAME: tool_result_data = plan_and_execute_workflow_tool(**function_args)
                                     elif function_name == CREATE_WALL_TOOL_NAME: tool_result_data = create_wall_mcp_tool(**function_args)
                                     elif function_name == CREATE_FLOOR_TOOL_NAME: tool_result_data = create_floor_mcp_tool(**function_args)
+                                    # CREATE_DUCT_TOOL_NAME will be added later
                                     else:
                                         app.logger.warning(f"Ollama (Tool Call Mode): Unknown tool {function_name} called.")
                                         tool_result_data = {"status": "error", "message": f"Unknown tool '{function_name}' requested by LLM."}
 
                                 messages_for_llm.append({
-                                    "tool_call_id": tool_call['id'],
+                                    "tool_call_id": tool_call['id'], # Ensure tool_call has 'id' if it's from direct OpenAI-like response
                                     "role": "tool",
                                     "name": function_name,
                                     "content": json.dumps(tool_result_data)
@@ -1217,12 +1237,137 @@ Use plan_and_execute_workflow for multi-step operations to provide complete resu
                         error_message_for_frontend = f"Ollama (Tool Call Mode) connection error: {e_conn}."
                         app.logger.error(f"Ollama (Tool Call Mode): Connection error to {ollama_api_url}. Error: {e_conn}", exc_info=True)
                     except requests.exceptions.HTTPError as e_http:
-                        error_message_for_frontend = f"Ollama (Tool Call Mode) HTTP error: {e_http}. Status: {e_http.response.status_code}. Response: {e_http.response.text[:200]}"
-                        app.logger.error(f"Ollama (Tool Call Mode): HTTP error from {ollama_api_url}. Status: {e_http.response.status_code}. Error: {e_http}", exc_info=True)
-                    except requests.exceptions.RequestException as e_req:
+                        if e_http.response is not None and e_http.response.status_code == 400:
+                            try:
+                                error_response_json = e_http.response.json()
+                                error_detail_msg = error_response_json.get("error", {}).get("message", str(error_response_json.get("error", ""))) # More robust error message fetching
+                                if "does not support tools" in error_detail_msg.lower() or "tools parameter not supported" in error_detail_msg.lower() or "unknown parameter 'tools'" in error_detail_msg.lower():
+                                    app.logger.warning(f"Ollama (Tool Call Mode): Model {ollama_model_name} does not support direct tool calling via 'tools' parameter (HTTP 400: {error_detail_msg}). Attempting fallback prompt.")
+
+                                    simplified_tools_prompt_list = get_simplified_tool_list_for_prompt(REVIT_TOOLS_SPEC_FOR_LLMS['ollama'])
+                                    fallback_system_prompt_content = (
+                                        planning_system_prompt["content"] +
+                                        "\n\nIMPORTANT: You can use tools to interact with Revit. "
+                                        "If you need to use a tool, you MUST respond ONLY with a single JSON object on a new line, formatted EXACTLY like this: "
+                                        '{\"tool_name\": \"NAME_OF_THE_TOOL\", \"tool_arguments\": {\"arg1\": \"value1\", \"arg2\": value2_if_number_or_bool}}'
+                                        "Do not add any other text, explanations, or markdown formatting before or after the JSON object. "
+                                        "If you do not need to use a tool, provide a direct textual answer to the user's query without any JSON. "
+                                        "Available tools:\n" + simplified_tools_prompt_list
+                                    )
+
+                                    fallback_messages = [{"role": "system", "content": fallback_system_prompt_content}] + \
+                                                        [{"role": "assistant" if msg['role'] == 'bot' else msg['role'],
+                                                          "content": msg['content']} for msg in conversation_history]
+
+                                    fallback_payload = {"model": ollama_model_name, "messages": fallback_messages}
+                                    app.logger.debug(f"Ollama (Fallback): Sending payload to {ollama_api_url}: {json.dumps(fallback_payload, indent=2)}")
+
+                                    try:
+                                        fallback_response_raw = requests.post(ollama_api_url, json=fallback_payload, headers=headers, timeout=120)
+                                        fallback_response_raw.raise_for_status()
+                                        fallback_response_data = fallback_response_raw.json()
+                                        app.logger.debug(f"Ollama (Fallback): Received response: {json.dumps(fallback_response_data, indent=2)}")
+
+                                        if fallback_response_data.get("choices") and fallback_response_data["choices"][0].get("message") and \
+                                           fallback_response_data["choices"][0]["message"].get("content"):
+
+                                            llm_text_output = fallback_response_data["choices"][0]["message"]["content"]
+                                            parsed_tool_call = None
+                                            try:
+                                                potential_json = llm_text_output.strip()
+                                                if potential_json.startswith("{") and potential_json.endswith("}"):
+                                                    parsed_tool_call_data = json.loads(potential_json)
+                                                    if "tool_name" in parsed_tool_call_data and "tool_arguments" in parsed_tool_call_data:
+                                                        parsed_tool_call = parsed_tool_call_data
+                                                        app.logger.info(f"Ollama (Fallback): Parsed tool call from text: {parsed_tool_call}")
+                                            except json.JSONDecodeError:
+                                                app.logger.info(f"Ollama (Fallback): Output was not a JSON tool call. Treating as direct reply: {llm_text_output[:200]}")
+                                            except Exception as e_parse:
+                                                app.logger.error(f"Ollama (Fallback): Error parsing potential JSON: {e_parse}", exc_info=True)
+
+                                            if parsed_tool_call:
+                                                function_name = parsed_tool_call['tool_name']
+                                                function_args = parsed_tool_call['tool_arguments']
+
+                                                # Log the LLM's "thought" (the JSON tool call)
+                                                # We add this to messages_for_llm which was prepared for the *direct* tool call attempt.
+                                                # For fallback, we need to ensure messages_for_llm is correctly representing the conversation that led to this fallback tool call.
+                                                # The `fallback_messages` was used for the LLM query. We should use that as the base for the next turn.
+                                                current_conversation_for_fallback_tool_processing = fallback_messages + [{"role": "assistant", "content": llm_text_output}]
+
+
+                                                app.logger.info(f"Ollama (Fallback): Executing tool: {function_name} with args: {function_args}")
+                                                tool_result_data = {}
+                                                if function_name == REVIT_INFO_TOOL_NAME: tool_result_data = get_revit_project_info_mcp_tool()
+                                                elif function_name == GET_ELEMENTS_BY_CATEGORY_TOOL_NAME: tool_result_data = get_elements_by_category_mcp_tool(**function_args)
+                                                elif function_name == SELECT_ELEMENTS_TOOL_NAME: tool_result_data = select_elements_by_id_mcp_tool(**function_args)
+                                                elif function_name == SELECT_STORED_ELEMENTS_TOOL_NAME: tool_result_data = select_stored_elements_mcp_tool(**function_args)
+                                                elif function_name == LIST_STORED_ELEMENTS_TOOL_NAME: tool_result_data = list_stored_elements_mcp_tool()
+                                                elif function_name == FILTER_ELEMENTS_TOOL_NAME: tool_result_data = filter_elements_mcp_tool(**function_args)
+                                                elif function_name == GET_ELEMENT_PROPERTIES_TOOL_NAME: tool_result_data = get_element_properties_mcp_tool(**function_args)
+                                                elif function_name == UPDATE_ELEMENT_PARAMETERS_TOOL_NAME: tool_result_data = update_element_parameters_mcp_tool(**function_args)
+                                                elif function_name == PLANNER_TOOL_NAME: tool_result_data = plan_and_execute_workflow_tool(**function_args)
+                                                elif function_name == CREATE_WALL_TOOL_NAME: tool_result_data = create_wall_mcp_tool(**function_args)
+                                                elif function_name == CREATE_FLOOR_TOOL_NAME: tool_result_data = create_floor_mcp_tool(**function_args)
+                                                # CREATE_DUCT_TOOL_NAME will be added later
+                                                else:
+                                                    app.logger.warning(f"Ollama (Fallback): Unknown tool '{function_name}' requested via JSON.")
+                                                    tool_result_data = {"status": "error", "message": f"Unknown tool '{function_name}' requested by LLM via JSON."}
+
+                                                current_conversation_for_fallback_tool_processing.append({
+                                                    "role": "tool",
+                                                    "content": json.dumps(tool_result_data),
+                                                    # "name": function_name # Optional: if model expects name for tool role
+                                                })
+                                                app.logger.debug(f"Ollama (Fallback): Resending messages with tool results: {current_conversation_for_fallback_tool_processing}")
+
+                                                final_text_payload = {"model": ollama_model_name, "messages": current_conversation_for_fallback_tool_processing}
+                                                final_text_response_raw = requests.post(ollama_api_url, json=final_text_payload, headers=headers, timeout=120)
+                                                final_text_response_raw.raise_for_status()
+                                                final_text_response_data = final_text_response_raw.json()
+
+                                                if final_text_response_data.get("choices") and final_text_response_data["choices"][0].get("message") and \
+                                                   final_text_response_data["choices"][0]["message"].get("content"):
+                                                    model_reply_text = final_text_response_data["choices"][0]["message"]["content"]
+                                                else:
+                                                    model_reply_text = "Ollama (Fallback) model responded after tool use, but content was not in the expected format."
+                                                    app.logger.warning(f"Ollama (Fallback): Second response format unexpected: {final_text_response_data}")
+                                            else:
+                                                model_reply_text = llm_text_output
+                                        else:
+                                            model_reply_text = "Ollama (Fallback) model responded, but content was not in the expected format."
+                                            app.logger.warning(f"Ollama (Fallback): Response format unexpected after fallback request: {fallback_response_data}")
+                                        # Fallback processing finished for this path.
+                                        # We need to ensure this result is returned and doesn't fall through to outer error handling.
+                                        final_response_to_frontend["reply"] = model_reply_text # Set reply before returning
+                                        return jsonify(final_response_to_frontend) # Return response
+
+                                    except requests.exceptions.RequestException as e_fallback_req:
+                                        error_message_for_frontend = f"Ollama (Fallback) request failed: {e_fallback_req}"
+                                        app.logger.error(f"Ollama (Fallback): Request exception for {ollama_api_url}. Error: {e_fallback_req}", exc_info=True)
+                                    except Exception as e_fallback_gen:
+                                        error_message_for_frontend = f"Error during Ollama fallback processing: {str(e_fallback_gen)}"
+                                        app.logger.error(f"Ollama (Fallback): Unexpected error. Error: {e_fallback_gen}", exc_info=True)
+                                    # If fallback results in an error, error_message_for_frontend will be set.
+                                    # The function should then proceed to the standard error return block at the end of chat_api.
+                                    # No explicit return here, let it flow to the end if error_message_for_frontend is set.
+                                    # However, if successful, we returned above.
+                                    if model_reply_text: # If fallback succeeded and set a reply
+                                         final_response_to_frontend["reply"] = model_reply_text
+                                         return jsonify(final_response_to_frontend)
+
+                            except json.JSONDecodeError: # Error parsing the HTTP 400 error response itself
+                                app.logger.warning(f"Ollama (Tool Call Mode): Could not parse HTTP 400 error response as JSON: {e_http.response.text[:200]}")
+
+                        # If it wasn't a 400 error handled by fallback, or if parsing the error JSON failed.
+                        # This becomes the general catch for HTTPError if not handled by specific fallback logic.
+                        error_message_for_frontend = f"Ollama (Tool Call Mode) HTTP error: {e_http}. Status: {e_http.response.status_code if e_http.response else 'N/A'}. Response: {e_http.response.text[:200] if e_http.response else 'N/A'}"
+                        app.logger.error(f"Ollama (Tool Call Mode): HTTP error from {ollama_api_url}. Error: {e_http}", exc_info=True)
+
+                    except requests.exceptions.RequestException as e_req: # This catches non-HTTPError request issues from the primary attempt
                         error_message_for_frontend = f"Ollama (Tool Call Mode) request failed: {e_req}"
                         app.logger.error(f"Ollama (Tool Call Mode): Request exception for {ollama_api_url}. Error: {e_req}", exc_info=True)
-                    except Exception as e_ollama:
+                    except Exception as e_ollama: # Catch-all for other primary attempt issues (e.g., ValueError from response parsing)
                         error_message_for_frontend = f"An error occurred while processing the Ollama (Tool Call Mode) request: {str(e_ollama)}"
                         app.logger.error(f"Ollama (Tool Call Mode): Unexpected error for model {ollama_model_name}. Error: {e_ollama}", exc_info=True)
 
