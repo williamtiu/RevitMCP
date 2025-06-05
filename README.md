@@ -118,14 +118,19 @@ The system consists of two main parts that need to be running:
 | Add Ollama support                        | 1.0.0_002_20240729                 | ✅ Done     | Implemented in `server.py`; refined with `/v1/completions` endpoint. |
 | Add UI for Ollama URL and port input      | 1.0.0_001_20240729                 | ✅ Done     | Added to `index.html` settings modal                                |
 | Add test cases in the web UI              | 1.0.0_001_20240729                 | ✅ Done     | Added modal and JS logic in `index.html`                            |
-| Update documentation                      | 1.0.0_001_20240729                 | ✅ Done     | Updated README.md with new features & task table |
-| Full Code Review for consistency          | 1.0.0_001_20240729                 | ✅ Done     | Conceptual review completed.                     |
-| Comprehensive Task Tracking               | 1.0.0_001_20240729                 | ✅ Done     | This table is up-to-date.                        |
-| Functionality Verification                |                                    | ⬜ Todo     | Requires live testing of all LLM integrations & features |
-| Synchronized Documentation (README, comments) | 1.0.0_001_20240729                 | ✅ Done     | README updated; code comments reviewed.          |
-| Final Step-by-Step Review                 | 1.0.0_001_20240729                 | ✅ Done     | This review.                                     |
+| Update documentation                      | 1.0.0_001_20240729                 | ✅ Done     | Updated README.md with new features & task table                    |
+| Full Code Review for consistency          | 1.0.0_001_20240729                 | ✅ Done     | Conceptual review completed.                                        |
+| Comprehensive Task Tracking               | 1.0.0_001_20240729                 | ✅ Done     | This table is up-to-date.                                           |
+| Functionality Verification                |                                    | ⬜ Todo     | Requires live testing of all LLM integrations & features            |
+| Synchronized Documentation (README, comments) | 1.0.0_001_20240729                 | ✅ Done     | README updated; code comments reviewed.                             |
+| Final Step-by-Step Review                 | 1.0.0_001_20240729                 | ✅ Done     | This review.                                                        |
 | Create Wall and Floor Tools               | 1.0.0_003_20240729                 | ✅ Done     | Implemented in `server.py` & added to LLM specs.                  |
 | Comprehensive README Update               | 1.0.0_003_20240729                 | ✅ Done     | This update.                                                        |
+| Dev Docs - CONTRIBUTING.md                | 0.1.0_001_20240730                 | ✅ Done     | Created CONTRIBUTING.md with guidelines.                            |
+| Dev Docs - CHANGELOG.md                   | 0.1.0_001_20240730                 | ✅ Done     | Created CHANGELOG.md with initial v0.1.0 entry.                   |
+| Add LICENSE File                          | 0.1.0_001_20240730                 | ✅ Done     | Created LICENSE file with MIT License.                              |
+| Add Copyright notice                      | 0.1.0_001_20240730                 | ✅ Done     | Included in LICENSE file.                                           |
+| All documentation as markdown files       | 0.1.0_001_20240730                 | ✅ Done     | README, CONTRIBUTING, CHANGELOG, LICENSE created.                   |
 
 ## FAQ
 
@@ -167,6 +172,10 @@ The system consists of two main parts that need to be running:
 *   **General Issues:**
     *   Always check the `server_app.log` file located in `RevitMCP.extension/lib/RevitMCP_ExternalServer/server_logs/` for detailed error tracebacks.
     *   Ensure your `requirements.txt` are installed for the Python environment running `server.py`.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Contact / Support
 
