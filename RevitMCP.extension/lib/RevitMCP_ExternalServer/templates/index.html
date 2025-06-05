@@ -439,6 +439,7 @@
             </ul>
             <div class="sidebar-actions">
                 <button id="settings-button">&#8942;</button> <!-- Settings Icon changed to vertical ellipsis -->
+                <button id="test-cases-button" title="Test Cases" style="font-size: 1.2em; width: 40px; text-align: center; background-color: #343541; color: #ececec; border: 1px solid #555; padding: 10px; border-radius: 5px; cursor: pointer;">🧪</button>
             </div>
         </div>
         <div id="chat-area">
@@ -464,6 +465,12 @@
                         <optgroup label="Google Gemini">
                             <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                             <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        </optgroup>
+                        <optgroup label="Ollama">
+                            <option value="ollama-mistral">Ollama - Mistral</option>
+                            <option value="ollama-llama2">Ollama - Llama2</option>
+                            <option value="ollama-codellama">Ollama - CodeLlama</option>
+                            <option value="ollama-custom">Ollama - Custom</option>
                         </optgroup>
                     </select>
                     <!-- API Key input removed from here -->
@@ -495,6 +502,9 @@
             <label for="google-api-key">Google API Key:</label>
             <input type="password" id="google-api-key" name="google-api-key">
 
+            <label for="ollama-server-url">Ollama Server URL:</label>
+            <input type="text" id="ollama-server-url" name="ollama-server-url" placeholder="e.g., http://localhost:11434">
+
             <label for="preferred-model">Preferred Model:</label>
             <select id="preferred-model" name="preferred-model">
                 <!-- Options will be populated by JavaScript -->
@@ -504,7 +514,33 @@
         </div>
     </div>
 
+    <!-- Test Cases Modal -->
+    <div id="test-cases-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeTestCasesModal()">&times;</span>
+            <h2>RevitMCP Test Cases</h2>
+            <div id="test-cases-list" style="max-height: 400px; overflow-y: auto;">
+                <!-- Test cases will be populated here by JavaScript -->
+            </div>
+            <div class="modal-buttons">
+                <button onclick="closeTestCasesModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
     <script>
+        const revitTestCases = [
+            { id: "test_proj_info", name: "Get Project Info", prompt: "What is the current Revit project name, file path, and Revit version?" },
+            { id: "test_list_walls", name: "List All Walls", prompt: "Get all wall elements in the model. Store them." },
+            { id: "test_select_stored_walls", name: "Select Stored Walls", prompt: "Select the walls you just listed." },
+            { id: "test_list_doors", name: "List Doors on Level 1", prompt: "Find all doors on 'Level 1'. Store them." },
+            { id: "test_select_stored_doors_l1", name: "Select Stored Doors (L1)", prompt: "Now, select those doors found on Level 1." },
+            { id: "test_filter_windows_param", name: "Filter Windows by Parameter", prompt: "Find all windows with a 'Sill Height' parameter greater than '1000 mm'. Store them."},
+            { id: "test_get_properties_window", name: "Get Properties of One Window", prompt: "After finding windows, get the 'Width' and 'Height' parameters for the first window ID found."},
+            { id: "test_update_comment_conceptual", name: "Update Comment (Conceptual)", prompt: "Use the planner to create a workflow: 1. Find any three wall elements. 2. Update their 'Comments' parameter to 'RMC Test - Random Comment'. 3. Select these three walls."},
+            { id: "test_list_stored", name: "List Stored Elements", prompt: "List all element categories that are currently stored from previous commands." }
+        ];
+
         const messageLog = document.getElementById('message-log');
         const messageInput = document.getElementById('message-input');
         const sendButton = document.getElementById('send-button');
@@ -520,8 +556,14 @@
         const openaiApiKeyInput = document.getElementById('openai-api-key');
         const anthropicApiKeyInput = document.getElementById('anthropic-api-key');
         const googleApiKeyInput = document.getElementById('google-api-key');
+        const ollamaServerUrlInput = document.getElementById('ollama-server-url'); // Added
         const preferredModelSelect = document.getElementById('preferred-model');
         const settingsStatus = document.getElementById('settings-status');
+
+        // Test Cases Modal elements
+        const testCasesModal = document.getElementById('test-cases-modal');
+        const testCasesButton = document.getElementById('test-cases-button');
+        const testCasesListDiv = document.getElementById('test-cases-list');
 
         // New top bar buttons
         const topBarToggleSidebarButton = document.getElementById('top-bar-toggle-sidebar');
@@ -582,6 +624,7 @@
             openaiApiKeyInput.value = localStorage.getItem('revitMCP_openai_api_key') || '';
             anthropicApiKeyInput.value = localStorage.getItem('revitMCP_anthropic_api_key') || '';
             googleApiKeyInput.value = localStorage.getItem('revitMCP_google_api_key') || '';
+            ollamaServerUrlInput.value = localStorage.getItem('revitMCP_ollama_server_url') || 'http://localhost:11434'; // Added
             
             // Populate the preferred model selector by copying options from the main model selector
             preferredModelSelect.innerHTML = modelSelector.innerHTML;
@@ -605,6 +648,7 @@
             localStorage.setItem('revitMCP_openai_api_key', openaiApiKeyInput.value.trim());
             localStorage.setItem('revitMCP_anthropic_api_key', anthropicApiKeyInput.value.trim());
             localStorage.setItem('revitMCP_google_api_key', googleApiKeyInput.value.trim());
+            localStorage.setItem('revitMCP_ollama_server_url', ollamaServerUrlInput.value.trim()); // Added
             localStorage.setItem('revitMCPselectedModel', preferredModelSelect.value);
             
             settingsStatus.textContent = 'Settings saved!';
@@ -1013,10 +1057,50 @@
                 return localStorage.getItem('revitMCP_anthropic_api_key') || '';
             } else if (modelName.startsWith('gemini-')) {
                 return localStorage.getItem('revitMCP_google_api_key') || '';
+            } else if (modelName.startsWith('ollama-')) {
+                return localStorage.getItem('revitMCP_ollama_server_url') || 'http://localhost:11434'; // Added
             }
             // For 'echo_model' or any other model not matching known prefixes, no API key is needed by the backend.
             return ''; 
         }
+
+        // --- Test Cases Modal Logic ---
+        function openTestCasesModal() {
+            testCasesListDiv.innerHTML = ''; // Clear previous list
+            revitTestCases.forEach(tc => {
+                const button = document.createElement('button');
+                button.textContent = tc.name;
+                button.title = tc.prompt; // Show full prompt on hover
+                button.style.display = 'block';
+                button.style.width = '100%';
+                button.style.marginBottom = '8px';
+                button.style.padding = '10px';
+                button.style.textAlign = 'left';
+                button.style.backgroundColor = '#f0f0f0';
+                button.style.border = '1px solid #ccc';
+                button.style.borderRadius = '4px';
+                button.style.cursor = 'pointer';
+                button.onclick = () => {
+                    executeTestCase(tc.prompt);
+                    closeTestCasesModal();
+                };
+                testCasesListDiv.appendChild(button);
+            });
+            testCasesModal.style.display = 'block';
+        }
+
+        function closeTestCasesModal() {
+            testCasesModal.style.display = 'none';
+        }
+
+        function executeTestCase(promptText) {
+            messageInput.value = promptText; // Put prompt in input field
+            sendMessage(); // Send it
+        }
+
+        // Attach event listeners for test cases modal
+        if (testCasesButton) testCasesButton.addEventListener('click', openTestCasesModal);
+        // The close button in the modal uses an inline onclick for closeTestCasesModal().
 
     </script>
 </body>

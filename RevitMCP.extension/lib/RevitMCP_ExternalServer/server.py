@@ -989,6 +989,75 @@ Use plan_and_execute_workflow for multi-step operations to provide complete resu
                     model_reply_text = gemini_response_after_tool.text
                 else:
                     model_reply_text = gemini_response.text
+
+            # --- Ollama Models ---
+            elif selected_model_ui_name.startswith('ollama-'):
+                app.logger.info(f"Ollama model selected: {selected_model_ui_name}")
+                ollama_server_url = api_key # API key field is used for Ollama server URL
+
+                if not ollama_server_url:
+                    error_message_for_frontend = "Ollama server URL is missing. Please configure it in the API key field."
+                    app.logger.error("Ollama: Server URL not provided via API key field.")
+                else:
+                    try:
+                        # Extract actual model name, e.g., "mistral" from "ollama-mistral"
+                        extracted_ollama_model_name = selected_model_ui_name.split('-', 1)[1]
+                        ollama_api_url = f"{ollama_server_url.rstrip('/')}/api/chat"
+                        app.logger.info(f"Ollama: Connecting to {ollama_api_url} for model {extracted_ollama_model_name}")
+
+                        # Prepare messages for Ollama, ensuring roles are 'user' or 'assistant'
+                        # The planning_system_prompt is added here.
+                        ollama_messages = [planning_system_prompt]
+                        for msg in conversation_history:
+                            role = msg['role']
+                            if role == 'bot':
+                                role = 'assistant'
+                            # Ensure only 'user' and 'assistant' roles are passed, plus system prompt
+                            if role in ['user', 'assistant', 'system']:
+                                ollama_messages.append({"role": role, "content": msg['content']})
+
+                        ollama_payload = {
+                            "model": extracted_ollama_model_name,
+                            "messages": ollama_messages,
+                            "stream": False # Not streaming for initial implementation
+                        }
+
+                        app.logger.debug(f"Ollama: Sending payload: {json.dumps(ollama_payload, indent=2)}")
+
+                        response = requests.post(
+                            ollama_api_url,
+                            json=ollama_payload,
+                            headers={'Content-Type': 'application/json'},
+                            timeout=120 # Increased timeout for local LLMs
+                        )
+                        response.raise_for_status() # Raise an exception for bad status codes
+
+                        ollama_response_data = response.json()
+                        app.logger.debug(f"Ollama: Received response data: {json.dumps(ollama_response_data, indent=2)}")
+
+                        if ollama_response_data.get("message") and ollama_response_data["message"].get("content"):
+                            model_reply_text = ollama_response_data['message']['content']
+                            app.logger.info(f"Ollama: Successfully extracted reply from model {extracted_ollama_model_name}.")
+                        else:
+                            model_reply_text = "Ollama model responded, but content was not in the expected format."
+                            app.logger.warning(f"Ollama: Response format unexpected: {ollama_response_data}")
+
+                    except requests.exceptions.Timeout as e_timeout:
+                        error_message_for_frontend = f"Ollama request timed out: {e_timeout}. The local model might be too slow or the server is not responding."
+                        app.logger.error(f"Ollama: Request timed out to {ollama_api_url}. Error: {e_timeout}", exc_info=True)
+                    except requests.exceptions.ConnectionError as e_conn:
+                        error_message_for_frontend = f"Ollama connection error: {e_conn}. Is the Ollama server running at {ollama_server_url}?"
+                        app.logger.error(f"Ollama: Connection error to {ollama_api_url}. Error: {e_conn}", exc_info=True)
+                    except requests.exceptions.HTTPError as e_http:
+                        error_message_for_frontend = f"Ollama HTTP error: {e_http}. Status: {e_http.response.status_code}. Response: {e_http.response.text[:200]}"
+                        app.logger.error(f"Ollama: HTTP error from {ollama_api_url}. Status: {e_http.response.status_code}. Error: {e_http}", exc_info=True)
+                    except requests.exceptions.RequestException as e_req:
+                        error_message_for_frontend = f"Ollama request failed: {e_req}"
+                        app.logger.error(f"Ollama: Request exception for {ollama_api_url}. Error: {e_req}", exc_info=True)
+                    except Exception as e_ollama: # Catch-all for other Ollama specific issues
+                        error_message_for_frontend = f"An error occurred while processing the Ollama request: {str(e_ollama)}"
+                        app.logger.error(f"Ollama: Unexpected error for model {selected_model_ui_name}. Error: {e_ollama}", exc_info=True)
+
             else:
                 error_message_for_frontend = f"Model '{selected_model_ui_name}' is not recognized or supported."
 

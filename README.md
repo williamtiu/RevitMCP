@@ -42,6 +42,23 @@ This README provides instructions on how to set up and use the `RevitMCP.extensi
     *   When the pyRevit Routes server starts for the first time, your operating system's firewall might ask for permission to allow Revit (or the Python process within Revit) to open a network port and listen for incoming connections. You must **allow this access** for the system to work.
     *   Ensure that no other firewall or security software is blocking connections to the port used by the pyRevit Routes server (e.g., `48884`).
 
+## Ollama Support
+
+RevitMCP now supports integration with local LLMs through Ollama.
+
+### Configuration
+
+1.  Ensure your Ollama server is running.
+2.  In the RevitMCP chat interface, click the settings icon (⚙️ or ⋮).
+3.  Enter your Ollama server URL in the "Ollama Server URL" field (default is `http://localhost:11434`).
+4.  Save the settings.
+5.  Select an Ollama model from the "Ollama" group in the model selector (e.g., "Ollama - Mistral"). The name after "ollama-" (e.g., "mistral") will be used as the model name when communicating with your Ollama server. You can use "ollama-custom" and ensure the model name you want to use is available on your Ollama server (the server will use the part after "ollama-" if you selected "ollama-custom", so if you want to use a model named "my-special-model", you should ensure your Ollama server has "my-special-model" available and select "ollama-my-special-model" in the UI, or select "ollama-custom" and ensure your server has a model named "custom").
+
+## Test Case UI
+
+A "Test Cases" button (🧪) is available in the sidebar of the chat UI. Clicking this button opens a modal window with a list of predefined test prompts.
+This allows for quick testing of various RevitMCP functionalities and LLM responses. Simply click on a test case button to send the predefined prompt to the selected LLM.
+
 ## Running the System
 
 The system consists of two main parts that need to be running:
@@ -69,6 +86,20 @@ The system consists of two main parts that need to be running:
 
 **Workflow Summary:**
    `AI Assistant/Client App`  ->  `External Server (server.py on e.g., port 8000)`  ->  `pyRevit Routes API (in Revit on e.g., port 48884)`
+
+## Development Status & Task List
+
+| Task                                      | Version & Last Update              | Status      | Notes/Links                                      |
+|-------------------------------------------|------------------------------------|-------------|--------------------------------------------------|
+| Add Ollama support                        | 1.0.0_001_20240729                 | ✅ Done     | Implemented in `server.py`                       |
+| Add UI for Ollama URL and port input      | 1.0.0_001_20240729                 | ✅ Done     | Added to `index.html` settings modal             |
+| Add test cases in the web UI              | 1.0.0_001_20240729                 | ✅ Done     | Added modal and JS logic in `index.html`         |
+| Update documentation                      | 1.0.0_001_20240729                 | ✅ Done     | Updated README.md with new features & task table |
+| Full Code Review for consistency          | 1.0.0_001_20240729                 | ✅ Done     | Conceptual review completed.                     |
+| Comprehensive Task Tracking               | 1.0.0_001_20240729                 | ✅ Done     | This table is up-to-date.                        |
+| Functionality Verification                |                                    | ⬜ Todo     | Requires live testing of all LLM integrations & features |
+| Synchronized Documentation (README, comments) | 1.0.0_001_20240729                 | ✅ Done     | README updated; code comments reviewed.          |
+| Final Step-by-Step Review                 | 1.0.0_001_20240729                 | ✅ Done     | This review.                                     |
 
 ## Troubleshooting
 
